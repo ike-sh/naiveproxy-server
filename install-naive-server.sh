@@ -22,6 +22,7 @@ DATA_DIR="/var/lib/caddy"
 BACKUP_DIR="/var/backups/caddy-naive"
 UPDATE_SCRIPT="/usr/local/bin/update-caddy-naive"
 CLIENT_CONFIG="/root/naive-client-config.json"
+NODE_LINK_FILE="/root/naive-node-link.txt"
 ENV_FILE="/etc/caddy/naive.env"
 AUTO_UPDATE_SERVICE_FILE="/etc/systemd/system/caddy-naive-update.service"
 AUTO_UPDATE_TIMER_FILE="/etc/systemd/system/caddy-naive-update.timer"
@@ -94,7 +95,7 @@ usage() {
   print_banner
   cat <<USAGE
 
-Usage:
+用法：
   bash install-naive-server.sh --domain DOMAIN [options]
   bash install-naive-server.sh --menu
   bash install-naive-server.sh --interactive
@@ -104,22 +105,22 @@ Usage:
   bash install-naive-server.sh --uninstall
   bash install-naive-server.sh --purge
 
-Required:
-  --domain DOMAIN              Deployment domain, for example example.com.
+必填：
+  --domain DOMAIN              部署域名，例如 example.com。
 
-Options:
-  --email EMAIL                Email for Caddy ACME TLS registration.
-  --user USER                  Basic Auth username. Generated or reused if omitted.
-  --pass PASS                  Basic Auth password. Generated or reused if omitted.
-  --site-mode static|reverse   Fallback website mode. Default: static.
-  --upstream URL               Required when --site-mode reverse.
-  --repo OWNER/REPO            GitHub Release repo. Default: ${BUILDER_REPO_DEFAULT}.
-  --install-bin PATH           Caddy install path. Default: /usr/local/bin/caddy.
-  --service-name NAME          systemd service name. Default: caddy.
+选项：
+  --email EMAIL                Caddy 申请 ACME TLS 证书使用的邮箱。
+  --user USER                  Basic Auth 用户名；不传则自动生成或复用。
+  --pass PASS                  Basic Auth 密码；不传则自动生成或复用。
+  --site-mode static|reverse   回落网站模式，默认 static。
+  --upstream URL               reverse 模式必填。
+  --repo OWNER/REPO            GitHub Release 仓库，默认：${BUILDER_REPO_DEFAULT}。
+  --install-bin PATH           Caddy 安装路径，默认：/usr/local/bin/caddy。
+  --service-name NAME          systemd 服务名，默认：caddy。
   --menu                       进入主菜单。
   --interactive, -i            进入主菜单，不直接进入安装向导。
-  --auto-update                Install and enable a daily systemd update timer.
-  --no-start                   Write files only; do not enable or start services/timers.
+  --auto-update                安装并启用每日自动更新 timer。
+  --no-start                   只写入文件，不启用或启动服务/timer。
   --version                    显示脚本版本、作者、GitHub 地址和 Builder 仓库地址。
   --status                     查看当前安装状态。
   --check-update               检测 GitHub Release 是否有新 Caddy naive 内核。
@@ -127,11 +128,11 @@ Options:
   --force-update               强制重新安装 latest Caddy naive 内核。
   --show-client                显示客户端配置。
   --logs                       查看 caddy 日志。
-  --uninstall                  Uninstall service units and updater; keep config/site/data.
-  --purge                      Remove service, updater, binary, config, site and data.
-  --help                       Show this help.
+  --uninstall                  卸载服务和更新脚本，保留配置、站点和数据。
+  --purge                      完全卸载服务、更新脚本、二进制、配置、站点和数据。
+  --help                       显示帮助。
 
-Examples:
+示例：
   bash install-naive-server.sh --domain example.com --email me@example.com --site-mode static
   bash install-naive-server.sh --domain example.com --site-mode reverse --upstream https://www.example.org
 USAGE
@@ -139,6 +140,40 @@ USAGE
 
 refresh_paths() {
   SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+}
+
+url_encode() {
+  local input="$1"
+  local output="" char hex i
+  local LC_ALL=C
+  for ((i = 0; i < ${#input}; i++)); do
+    char="${input:i:1}"
+    case "$char" in
+      [a-zA-Z0-9.~_-])
+        output+="$char"
+        ;;
+      *)
+        printf -v hex '%%%02X' "'$char"
+        output+="$hex"
+        ;;
+    esac
+  done
+
+  printf '%s' "$output"
+}
+
+build_proxy_url() {
+  local encoded_user encoded_pass
+  encoded_user="$(url_encode "$AUTH_USER")"
+  encoded_pass="$(url_encode "$AUTH_PASS")"
+  printf 'https://%s:%s@%s' "$encoded_user" "$encoded_pass" "$DOMAIN"
+}
+
+caddyfile_quote() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "$value"
 }
 
 parse_args() {
@@ -390,35 +425,35 @@ print_install_summary() {
   local password_label upstream_label email_label start_label auto_update_label
 
   if [[ -n "$AUTH_PASS" ]]; then
-    password_label="provided, hidden"
+    password_label="已填写，隐藏显示"
   else
-    password_label="auto-generate"
+    password_label="自动生成"
   fi
 
-  email_label="${EMAIL:-not set}"
-  upstream_label="${UPSTREAM:-not set}"
+  email_label="${EMAIL:-未设置}"
+  upstream_label="${UPSTREAM:-未设置}"
   if [[ "$AUTO_UPDATE" -eq 1 ]]; then
-    auto_update_label="yes"
+    auto_update_label="是"
   else
-    auto_update_label="no"
+    auto_update_label="否"
   fi
   if [[ "$NO_START" -eq 1 ]]; then
-    start_label="no"
+    start_label="否"
   else
-    start_label="yes"
+    start_label="是"
   fi
 
   cat <<SUMMARY
 
-Installation summary:
-  Domain: ${DOMAIN}
-  Email: ${email_label}
-  User: ${AUTH_USER:-auto-generate}
-  Password: ${password_label}
-  Site mode: ${SITE_MODE}
-  Upstream: ${upstream_label}
-  Auto update: ${auto_update_label}
-  Start service now: ${start_label}
+安装确认信息：
+  部署域名：${DOMAIN}
+  ACME 邮箱：${email_label}
+  认证用户：${AUTH_USER:-自动生成}
+  认证密码：${password_label}
+  回落模式：${SITE_MODE}
+  反代目标：${upstream_label}
+  自动更新：${auto_update_label}
+  立即启动服务：${start_label}
 SUMMARY
 }
 
@@ -431,7 +466,7 @@ confirm_interactive_install() {
       return 0
       ;;
     *)
-      printf '[WARN] Installation cancelled.\n'
+      printf '[WARN] 已取消安装。\n'
       exit 0
       ;;
   esac
@@ -455,7 +490,7 @@ TITLE
       if [[ "$UPSTREAM" =~ ^https?:// ]]; then
         break
       fi
-      log_warn "upstream URL must start with http:// or https://."
+      log_warn "upstream URL 必须以 http:// 或 https:// 开头。"
       UPSTREAM=""
     done
   else
@@ -480,21 +515,21 @@ TITLE
 
 require_root() {
   if [[ "${EUID}" -ne 0 ]]; then
-    die "This script must be run as root."
+    die "请使用 root 权限运行此脚本。"
   fi
 }
 
 require_supported_os() {
-  [[ -r /etc/os-release ]] || die "Cannot detect OS: /etc/os-release is missing."
+  [[ -r /etc/os-release ]] || die "无法检测系统：/etc/os-release 不存在。"
   # shellcheck disable=SC1091
   . /etc/os-release
   local id="${ID:-}"
   local like="${ID_LIKE:-}"
   case " ${id} ${like} " in
     *" debian "*|*" ubuntu "*) ;;
-    *) die "Only Debian and Ubuntu are supported." ;;
+    *) die "仅支持 Debian / Ubuntu。" ;;
   esac
-  command -v apt-get >/dev/null 2>&1 || die "apt-get is required but was not found."
+  command -v apt-get >/dev/null 2>&1 || die "需要 apt-get，但当前系统未找到。"
 }
 
 require_amd64() {
@@ -506,14 +541,14 @@ require_amd64() {
       die "当前 Release 只提供 linux-amd64，请不要继续安装。"
       ;;
     *)
-      die "Unsupported architecture: ${arch}. Only linux-amd64 is supported."
+      die "不支持的架构：${arch}。当前仅支持 linux-amd64。"
       ;;
   esac
 }
 
 print_disk_cleanup_hint() {
   cat >&2 <<'HINT'
-Please free disk space and try again. Useful commands:
+请释放磁盘空间后重试。可参考以下命令：
   df -h
   apt clean
   rm -rf /var/lib/apt/lists/*
@@ -525,23 +560,23 @@ check_root_free_space() {
   local df_output available
 
   if ! command -v df >/dev/null 2>&1; then
-    log_warn "Cannot check root filesystem free space: df command not found."
+    log_warn "无法检查根分区可用空间：未找到 df 命令。"
     return 0
   fi
 
   if ! df_output="$(df -Pm / 2>/dev/null)"; then
-    log_warn "Cannot check root filesystem free space: df -Pm / failed."
+    log_warn "无法检查根分区可用空间：df -Pm / 执行失败。"
     return 0
   fi
 
   if ! command -v awk >/dev/null 2>&1; then
-    log_warn "Cannot parse root filesystem free space: awk command not found."
+    log_warn "无法解析根分区可用空间：未找到 awk 命令。"
     return 0
   fi
 
   available="$(awk 'NR == 2 { print $4 }' <<< "$df_output")"
   if [[ ! "$available" =~ ^[0-9]+$ ]]; then
-    log_warn "Cannot parse root filesystem free space from df output."
+    log_warn "无法从 df 输出解析根分区可用空间。"
     return 0
   fi
 
@@ -551,7 +586,7 @@ check_root_free_space() {
     exit 1
   fi
 
-  log_info "Root filesystem free space: ${available}MB."
+  log_info "根分区可用空间：${available}MB。"
 }
 
 install_dependencies() {
@@ -566,14 +601,14 @@ install_dependencies() {
   )
   local apt_log
 
-  log_info "Installing base dependencies with apt-get..."
+  log_info "正在使用 apt-get 安装基础依赖..."
   apt_log="$(mktemp)"
   if ! apt-get update >"$apt_log" 2>&1; then
     if grep -qi "No space left on device" "$apt_log"; then
-      log_error "apt-get update failed: No space left on device."
+      log_error "apt-get update 失败：No space left on device。"
       print_disk_cleanup_hint
     else
-      log_error "apt-get update failed:"
+      log_error "apt-get update 失败："
       cat "$apt_log" >&2
     fi
     rm -f "$apt_log"
@@ -582,45 +617,45 @@ install_dependencies() {
   rm -f "$apt_log"
 
   DEBIAN_FRONTEND=noninteractive apt-get install -y "${deps[@]}"
-  log_ok "Dependencies are ready."
+  log_ok "基础依赖已就绪。"
 }
 
 validate_domain() {
-  [[ -n "$DOMAIN" ]] || die "--domain is required."
-  [[ "$DOMAIN" != *"://"* ]] || die "--domain must be a hostname, not a URL."
-  [[ "$DOMAIN" != *"/"* ]] || die "--domain must not contain a path."
-  [[ "$DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]] || die "--domain contains unsupported characters."
-  [[ "$DOMAIN" == *.* ]] || log_warn "Domain does not contain a dot; public TLS issuance may fail."
+  [[ -n "$DOMAIN" ]] || die "必须提供 --domain。"
+  [[ "$DOMAIN" != *"://"* ]] || die "--domain 必须是域名，不是 URL。"
+  [[ "$DOMAIN" != *"/"* ]] || die "--domain 不能包含路径。"
+  [[ "$DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]] || die "--domain 包含不支持的字符。"
+  [[ "$DOMAIN" == *.* ]] || log_warn "域名不包含点号，公网 TLS 证书申请可能失败。"
 }
 
 validate_common_args() {
-  [[ "$SITE_MODE" == "static" || "$SITE_MODE" == "reverse" ]] || die "--site-mode must be static or reverse."
-  [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "--repo must look like OWNER/REPO."
-  [[ "$INSTALL_BIN" == /* ]] || die "--install-bin must be an absolute path."
-  [[ "$INSTALL_BIN" != *[[:space:]]* ]] || die "--install-bin must not contain whitespace."
-  [[ "$SERVICE_NAME" =~ ^[A-Za-z0-9_.@-]+$ ]] || die "--service-name contains unsupported characters."
+  [[ "$SITE_MODE" == "static" || "$SITE_MODE" == "reverse" ]] || die "--site-mode 必须是 static 或 reverse。"
+  [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "--repo 必须是 OWNER/REPO 格式。"
+  [[ "$INSTALL_BIN" == /* ]] || die "--install-bin 必须是绝对路径。"
+  [[ "$INSTALL_BIN" != *[[:space:]]* ]] || die "--install-bin 不能包含空白字符。"
+  [[ "$SERVICE_NAME" =~ ^[A-Za-z0-9_.@-]+$ ]] || die "--service-name 包含不支持的字符。"
   if [[ -n "$EMAIL" ]]; then
-    [[ "$EMAIL" != *[[:space:]]* ]] || die "--email must not contain whitespace."
+    [[ "$EMAIL" != *[[:space:]]* ]] || die "--email 不能包含空白字符。"
   fi
 }
 
 parse_upstream() {
   if [[ "$SITE_MODE" != "reverse" ]]; then
     if [[ -n "$UPSTREAM" ]]; then
-      log_warn "--upstream is ignored when --site-mode is static."
+      log_warn "--site-mode 为 static 时会忽略 --upstream。"
     fi
     return
   fi
 
-  [[ -n "$UPSTREAM" ]] || die "--upstream is required when --site-mode reverse."
+  [[ -n "$UPSTREAM" ]] || die "--site-mode reverse 时必须提供 --upstream。"
   if [[ ! "$UPSTREAM" =~ ^(https?)://([^/?#]+) ]]; then
-    die "--upstream must start with http:// or https://."
+    die "--upstream 必须以 http:// 或 https:// 开头。"
   fi
 
   local scheme="${BASH_REMATCH[1]}"
   local authority="${BASH_REMATCH[2]}"
-  [[ -n "$authority" ]] || die "Cannot parse upstream host."
-  [[ "$authority" != *"@"* ]] || die "--upstream must not contain userinfo."
+  [[ -n "$authority" ]] || die "无法解析 upstream host。"
+  [[ "$authority" != *"@"* ]] || die "--upstream 不能包含 userinfo。"
 
   UPSTREAM_BASE="${scheme}://${authority}"
   if [[ "$authority" =~ ^\[([^]]+)\](:[0-9]+)?$ ]]; then
@@ -629,8 +664,8 @@ parse_upstream() {
     UPSTREAM_HOST="${authority%%:*}"
   fi
 
-  [[ -n "$UPSTREAM_HOST" ]] || die "Cannot parse upstream host."
-  [[ "$UPSTREAM_HOST" =~ ^[A-Za-z0-9.-]+$ || "$UPSTREAM_HOST" =~ ^[0-9A-Fa-f:]+$ ]] || die "Upstream host contains unsupported characters."
+  [[ -n "$UPSTREAM_HOST" ]] || die "无法解析 upstream host。"
+  [[ "$UPSTREAM_HOST" =~ ^[A-Za-z0-9.-]+$ || "$UPSTREAM_HOST" =~ ^[0-9A-Fa-f:]+$ ]] || die "Upstream host 包含不支持的字符。"
 
   log_warn "反代第三方网站可能受 CSP、Cookie、登录、跳转和法律合规影响，建议只反代自己有权使用的网站或普通公开静态站点。"
 }
@@ -673,9 +708,9 @@ load_saved_install_info() {
 validate_credential_token() {
   local name="$1"
   local value="$2"
-  [[ -n "$value" ]] || die "${name} must not be empty."
-  if [[ ! "$value" =~ ^[A-Za-z0-9._~-]+$ ]]; then
-    die "${name} may only contain A-Z, a-z, 0-9, dot, underscore, tilde and hyphen. Avoid '/', '@', ':' and whitespace."
+  [[ -n "$value" ]] || die "${name} 不能为空。"
+  if [[ ! "$value" =~ ^[A-Za-z0-9._~:/@+-]+$ ]]; then
+    die "${name} 只能包含 A-Z、a-z、0-9、点号、下划线、波浪线、冒号、斜杠、@、加号和连字符。"
   fi
 }
 
@@ -687,20 +722,20 @@ prepare_credentials() {
   if [[ -z "$AUTH_USER" ]]; then
     if [[ "$INTERACTIVE" -eq 0 && -n "$existing_user" ]]; then
       AUTH_USER="$existing_user"
-      log_info "Reusing existing Basic Auth username from $ENV_FILE."
+      log_info "复用 $ENV_FILE 中已有的 Basic Auth 用户名。"
     else
       AUTH_USER="user$(openssl rand -hex 4)"
-      log_info "Generated Basic Auth username."
+      log_info "已生成 Basic Auth 用户名。"
     fi
   fi
 
   if [[ -z "$AUTH_PASS" ]]; then
     if [[ "$INTERACTIVE" -eq 0 && -n "$existing_pass" ]]; then
       AUTH_PASS="$existing_pass"
-      log_info "Reusing existing Basic Auth password from $ENV_FILE."
+      log_info "复用 $ENV_FILE 中已有的 Basic Auth 密码。"
     else
       AUTH_PASS="$(openssl rand -hex 24)"
-      log_info "Generated strong random Basic Auth password."
+      log_info "已生成强随机 Basic Auth 密码。"
     fi
   fi
 
@@ -728,14 +763,14 @@ backup_file() {
   cp -a "$path" "$dest"
   chmod go-rwx "$dest" 2>/dev/null || true
   LAST_BACKUP_PATH="$dest"
-  log_info "Backed up $path -> $dest"
+  log_info "已备份 $path -> $dest"
 }
 
 check_dns() {
   if getent ahosts "$DOMAIN" >/dev/null 2>&1; then
     log_ok "DNS lookup succeeded for $DOMAIN."
   else
-    log_warn "DNS lookup failed for $DOMAIN. Continue anyway, but ACME issuance may fail."
+    log_warn "$DOMAIN DNS 解析失败。继续执行，但 ACME 证书申请可能失败。"
   fi
   log_info "Ensure ${DOMAIN} A/AAAA records point to this server and cloud security groups allow TCP 80/443."
 }
@@ -813,7 +848,7 @@ check_ports_available() {
 ensure_caddy_user_and_dirs() {
   if ! getent group caddy >/dev/null 2>&1; then
     groupadd --system caddy
-    log_ok "Created system group: caddy."
+    log_ok "已创建系统组：caddy。"
   fi
 
   if ! id -u caddy >/dev/null 2>&1; then
@@ -822,7 +857,7 @@ ensure_caddy_user_and_dirs() {
       --home-dir "$DATA_DIR" \
       --shell /usr/sbin/nologin \
       caddy
-    log_ok "Created system user: caddy."
+    log_ok "已创建系统用户：caddy。"
   fi
 
   mkdir -p "$CONFIG_DIR" "$SITE_DIR" "$DATA_DIR" "$BACKUP_DIR"
@@ -844,7 +879,7 @@ verify_sha256() {
   if (cd "$dir" && sha256sum -c "$SHA_ASSET_NAME" >/dev/null 2>&1); then
     expected="$(awk '{print $1; exit}' "$sha_file")"
     DOWNLOADED_ARCHIVE_SHA256="$expected"
-    log_ok "SHA256 checksum verified."
+    log_ok "SHA256 校验通过。"
     return 0
   fi
 
@@ -852,10 +887,10 @@ verify_sha256() {
   actual="$(sha256sum "$archive" | awk '{print $1}')"
   [[ -n "$expected" ]] || die "SHA256 file is empty or invalid."
   if [[ "$expected" != "$actual" ]]; then
-    die "SHA256 verification failed."
+    die "SHA256 校验失败。"
   fi
   DOWNLOADED_ARCHIVE_SHA256="$expected"
-  log_ok "SHA256 checksum verified."
+  log_ok "SHA256 校验通过。"
 }
 
 download_release_caddy() {
@@ -867,9 +902,9 @@ download_release_caddy() {
   archive_url="https://github.com/${REPO}/releases/latest/download/${ASSET_NAME}"
   sha_url="https://github.com/${REPO}/releases/latest/download/${SHA_ASSET_NAME}"
 
-  log_info "Downloading $archive_url"
+  log_info "正在下载 $archive_url"
   curl -fL --retry 3 --connect-timeout 20 -o "${TMP_DIR}/${ASSET_NAME}" "$archive_url"
-  log_info "Downloading $sha_url"
+  log_info "正在下载 $sha_url"
   curl -fL --retry 3 --connect-timeout 20 -o "${TMP_DIR}/${SHA_ASSET_NAME}" "$sha_url"
 
   verify_sha256 "$TMP_DIR"
@@ -879,11 +914,11 @@ download_release_caddy() {
   tar -xzf "${TMP_DIR}/${ASSET_NAME}" -C "$extract_dir"
 
   caddy_path="$(find "$extract_dir" -type f -name caddy | head -n 1)"
-  [[ -n "$caddy_path" ]] || die "The archive does not contain a caddy binary."
+  [[ -n "$caddy_path" ]] || die "压缩包中未找到 caddy 二进制。"
   chmod +x "$caddy_path"
-  [[ -x "$caddy_path" ]] || die "Extracted caddy binary is not executable."
+  [[ -x "$caddy_path" ]] || die "解压出的 caddy 二进制不可执行。"
   DOWNLOADED_CADDY="$caddy_path"
-  log_ok "Caddy binary extracted."
+  log_ok "Caddy 二进制已解压。"
 }
 
 show_caddy_version_and_check_modules() {
@@ -897,7 +932,7 @@ show_caddy_version_and_check_modules() {
     printf '%s\n' "$modules" >&2
     return 1
   fi
-  log_ok "forward_proxy module detected."
+  log_ok "已检测到 forward_proxy 模块。"
 }
 
 install_caddy_binary() {
@@ -910,15 +945,15 @@ install_caddy_binary() {
 
   install -m 0755 "$DOWNLOADED_CADDY" "$INSTALL_BIN"
   if command -v setcap >/dev/null 2>&1; then
-    setcap cap_net_bind_service=+ep "$INSTALL_BIN" || log_warn "setcap failed; systemd AmbientCapabilities should still allow binding to 80/443."
+    setcap cap_net_bind_service=+ep "$INSTALL_BIN" || log_warn "setcap 失败；systemd AmbientCapabilities 通常仍可允许绑定 80/443。"
   fi
 
   if ! show_caddy_version_and_check_modules; then
     if [[ -n "$previous_backup" ]]; then
       cp -a "$previous_backup" "$INSTALL_BIN"
-      log_warn "Restored previous Caddy binary from $previous_backup."
+      log_warn "已从 $previous_backup 恢复旧 Caddy 二进制。"
     fi
-    die "Caddy binary verification failed."
+    die "Caddy 二进制校验失败。"
   fi
 }
 
@@ -1076,13 +1111,23 @@ User-agent: *
 Disallow:
 ROBOTS
 
-  chown -R caddy:caddy "$SITE_DIR"
-  chmod 644 "${SITE_DIR}/index.html" "${SITE_DIR}/robots.txt"
-  log_ok "Static fallback site generated."
+  fix_static_site_permissions
+  log_ok "静态回落站点已生成。"
+}
+
+fix_static_site_permissions() {
+  if [[ -d "$SITE_DIR" ]]; then
+    chown -R caddy:caddy "$SITE_DIR" 2>/dev/null || true
+    find "$SITE_DIR" -type d -exec chmod 755 {} \; 2>/dev/null || true
+    find "$SITE_DIR" -type f -exec chmod 644 {} \; 2>/dev/null || true
+  fi
 }
 
 write_caddyfile_content() {
   local order_mode="$1"
+  local auth_user_caddy auth_pass_caddy
+  auth_user_caddy="$(caddyfile_quote "$AUTH_USER")"
+  auth_pass_caddy="$(caddyfile_quote "$AUTH_PASS")"
   {
     printf '{\n'
     if [[ "$order_mode" == "strict" ]]; then
@@ -1100,7 +1145,7 @@ write_caddyfile_content() {
     fi
     printf '\n'
     printf '  forward_proxy {\n'
-    printf '    basic_auth %s %s\n' "$AUTH_USER" "$AUTH_PASS"
+    printf '    basic_auth %s %s\n' "$auth_user_caddy" "$auth_pass_caddy"
     printf '    hide_ip\n'
     printf '    hide_via\n'
     printf '    probe_resistance\n'
@@ -1131,11 +1176,11 @@ validate_caddyfile() {
   output_file="$(mktemp)"
   if "$INSTALL_BIN" validate --config "$CADDYFILE" >"$output_file" 2>&1; then
     rm -f "$output_file"
-    log_ok "Caddyfile validation passed."
+    log_ok "Caddyfile 校验通过。"
     return 0
   fi
 
-  log_error "Caddyfile validation failed:"
+  log_error "Caddyfile 校验失败："
   cat "$output_file" >&2
   rm -f "$output_file"
   return 1
@@ -1151,7 +1196,7 @@ write_and_validate_caddyfile() {
     return 0
   fi
 
-  log_warn "Retrying Caddyfile with equivalent single order directive: order forward_proxy first."
+  log_warn "正在改用等价的单条 order 指令重试：order forward_proxy first。"
   write_caddyfile_content "first"
   if validate_caddyfile; then
     return 0
@@ -1160,11 +1205,11 @@ write_and_validate_caddyfile() {
   if [[ -n "$caddyfile_backup" ]]; then
     cp -a "$caddyfile_backup" "$CADDYFILE"
     log_warn "Restored previous Caddyfile from $caddyfile_backup."
-    die "Caddyfile validation failed. Backup is available at $caddyfile_backup."
+    die "Caddyfile 校验失败。备份位于：$caddyfile_backup"
   fi
 
   rm -f "$CADDYFILE"
-  die "Caddyfile validation failed. No previous Caddyfile backup was available."
+  die "Caddyfile 校验失败，且没有可用的旧 Caddyfile 备份。"
 }
 
 write_systemd_service() {
@@ -1195,7 +1240,7 @@ NoNewPrivileges=true
 WantedBy=multi-user.target
 SERVICE
   chmod 644 "$SERVICE_FILE"
-  log_ok "systemd service written to $SERVICE_FILE."
+  log_ok "systemd service 已写入：$SERVICE_FILE"
 }
 
 write_update_script() {
@@ -1519,20 +1564,32 @@ main "$@"
 UPDATE_BODY
   } > "$UPDATE_SCRIPT"
   chmod 755 "$UPDATE_SCRIPT"
-  log_ok "Updater written to $UPDATE_SCRIPT."
+  log_ok "更新脚本已写入：$UPDATE_SCRIPT"
 }
 
 write_client_config() {
+  local proxy_url
+  proxy_url="$(build_proxy_url)"
   backup_file "$CLIENT_CONFIG"
   umask 077
   cat > "$CLIENT_CONFIG" <<JSON
 {
   "listen": "socks://127.0.0.1:1080",
-  "proxy": "https://${AUTH_USER}:${AUTH_PASS}@${DOMAIN}"
+  "proxy": "${proxy_url}"
 }
 JSON
   chmod 600 "$CLIENT_CONFIG"
-  log_ok "Client config written to $CLIENT_CONFIG."
+  log_ok "客户端 JSON 配置已写入：$CLIENT_CONFIG"
+}
+
+write_node_link_file() {
+  local proxy_url
+  proxy_url="$(build_proxy_url)"
+  backup_file "$NODE_LINK_FILE"
+  umask 077
+  printf '%s\n' "$proxy_url" > "$NODE_LINK_FILE"
+  chmod 600 "$NODE_LINK_FILE"
+  log_ok "节点链接文件已写入：$NODE_LINK_FILE"
 }
 
 write_env_file() {
@@ -1553,7 +1610,7 @@ RELEASE_SHA256=${DOWNLOADED_ARCHIVE_SHA256}
 INSTALLED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 ENV
   chmod 600 "$ENV_FILE"
-  log_ok "Install information written to $ENV_FILE."
+  log_ok "安装信息已写入：$ENV_FILE"
 }
 
 write_auto_update_units() {
@@ -1588,30 +1645,30 @@ TIMER
 
   systemctl daemon-reload
   if [[ "$NO_START" -eq 1 ]]; then
-    log_warn "--no-start specified; auto-update timer files were written but not enabled."
+    log_warn "已指定 --no-start；自动更新 timer 文件已写入但未启用。"
   else
     systemctl enable --now caddy-naive-update.timer
-    log_ok "Auto-update timer enabled."
+    log_ok "自动更新 timer 已启用。"
   fi
 }
 
 start_or_reload_service() {
   systemctl daemon-reload
   if [[ "$NO_START" -eq 1 ]]; then
-    log_warn "--no-start specified; ${SERVICE_NAME} was not enabled or started."
+    log_warn "已指定 --no-start；未启用或启动 ${SERVICE_NAME}。"
     return 0
   fi
 
   systemctl enable "$SERVICE_NAME"
   if ! systemctl restart "$SERVICE_NAME"; then
-    log_error "Failed to start ${SERVICE_NAME}."
-    log_warn "If systemd status shows a notify timeout, edit ${SERVICE_FILE} and change Type=notify to Type=simple, then run: systemctl daemon-reload && systemctl restart ${SERVICE_NAME}"
+    log_error "启动 ${SERVICE_NAME} 失败。"
+    log_warn "如果 systemd 状态显示 notify 超时，可编辑 ${SERVICE_FILE} 将 Type=notify 改为 Type=simple，然后执行：systemctl daemon-reload && systemctl restart ${SERVICE_NAME}"
     systemctl --no-pager --full status "$SERVICE_NAME" || true
     exit 1
   fi
 
   systemctl --no-pager --full status "$SERVICE_NAME"
-  log_ok "Service ${SERVICE_NAME} is running."
+  log_ok "服务 ${SERVICE_NAME} 正在运行。"
 }
 
 confirm_or_exit() {
@@ -1629,7 +1686,7 @@ remove_file_with_backup() {
   if [[ -e "$path" || -L "$path" ]]; then
     backup_file "$path"
     rm -f "$path"
-    log_ok "Removed $path."
+    log_ok "已删除 $path。"
   fi
 }
 
@@ -1704,6 +1761,7 @@ purge_all() {
     remove_file_with_backup "/usr/local/bin/caddy"
   fi
   remove_file_with_backup "$CLIENT_CONFIG"
+  remove_file_with_backup "$NODE_LINK_FILE"
 
   rm -rf "$CONFIG_DIR" "$SITE_DIR" "$DATA_DIR"
   rm -rf "$BACKUP_DIR"
@@ -1715,70 +1773,86 @@ show_current_status() {
   load_saved_install_info
 
   cat <<STATUS
-[INFO] Current configuration
-  Domain: ${DOMAIN:-not set}
-  User: ${AUTH_USER:-not set}
-  Site mode: ${SITE_MODE:-not set}
-  Upstream: ${UPSTREAM:-not set}
-  Repo: ${REPO}
-  Caddy binary: ${INSTALL_BIN}
-  Service: ${SERVICE_NAME}
+[INFO] 当前配置
+  部署域名：${DOMAIN:-未设置}
+  认证用户：${AUTH_USER:-未设置}
+  回落模式：${SITE_MODE:-未设置}
+  反代目标：${UPSTREAM:-未设置}
+  Builder 仓库：${REPO}
+  Caddy 二进制：${INSTALL_BIN}
+  服务名：${SERVICE_NAME}
 STATUS
 
   if [[ -x "$INSTALL_BIN" ]]; then
     "$INSTALL_BIN" version || true
     if "$INSTALL_BIN" list-modules 2>/dev/null | grep -Eiq 'forward_proxy|forwardproxy'; then
-      log_ok "forward_proxy module detected."
+      log_ok "已检测到 forward_proxy 模块。"
     else
-      log_warn "forward_proxy module was not detected by list-modules."
+      log_warn "list-modules 未检测到 forward_proxy 模块。"
     fi
   else
-    log_warn "Caddy binary not found or not executable: $INSTALL_BIN"
+    log_warn "未找到 Caddy 二进制或不可执行：$INSTALL_BIN"
   fi
 
   if command -v systemctl >/dev/null 2>&1; then
     systemctl --no-pager --full status "$SERVICE_NAME" || true
     if systemctl is-enabled --quiet caddy-naive-update.timer 2>/dev/null; then
-      log_ok "Auto-update timer is enabled."
+      log_ok "自动更新 timer 已启用。"
     else
-      log_warn "Auto-update timer is not enabled."
+      log_warn "自动更新 timer 未启用。"
     fi
   else
-    log_warn "systemctl is not available."
+    log_warn "当前环境没有 systemctl。"
   fi
 }
 
 show_client_config() {
   local found=0
+  local proxy_url=""
   load_saved_install_info
+
+  if [[ -n "$DOMAIN" && -n "$AUTH_USER" && -n "$AUTH_PASS" ]]; then
+    proxy_url="$(build_proxy_url)"
+    found=1
+    cat <<URL
+[INFO] NaiveProxy 节点链接：
+  ${proxy_url}
+URL
+  fi
+
+  if [[ -f "$NODE_LINK_FILE" ]]; then
+    found=1
+    if [[ -r "$NODE_LINK_FILE" ]]; then
+      cat <<CONFIG
+[INFO] 节点链接文件：${NODE_LINK_FILE}
+CONFIG
+      cat "$NODE_LINK_FILE"
+      printf '\n'
+    else
+      printf '[WARN] 节点链接文件存在但不可读：%s\n' "$NODE_LINK_FILE"
+    fi
+  fi
 
   if [[ -f "$CLIENT_CONFIG" ]]; then
     found=1
     if [[ -r "$CLIENT_CONFIG" ]]; then
       cat <<CONFIG
-[INFO] Client config: ${CLIENT_CONFIG}
+[INFO] 客户端 JSON 配置：${CLIENT_CONFIG}
 CONFIG
       cat "$CLIENT_CONFIG"
       printf '\n'
     else
-      log_warn "Client config exists but is not readable: $CLIENT_CONFIG"
+      printf '[WARN] 客户端配置存在但不可读：%s\n' "$CLIENT_CONFIG"
     fi
   fi
 
-  if [[ -f "$ENV_FILE" ]]; then
+  if [[ -f "$ENV_FILE" && -z "$proxy_url" ]]; then
     found=1
-    if [[ -n "$DOMAIN" && -n "$AUTH_USER" && -n "$AUTH_PASS" ]]; then
-      cat <<URL
-[INFO] NaiveProxy URL:
-  https://${AUTH_USER}:${AUTH_PASS}@${DOMAIN}
-URL
-    else
-      log_warn "${ENV_FILE} exists, but DOMAIN/USER/PASS is incomplete or unreadable."
-    fi
+    printf '[WARN] %s 存在，但 DOMAIN/USER/PASS 不完整或不可读。\n' "$ENV_FILE"
   fi
 
   if [[ "$found" -eq 0 ]]; then
-    log_warn "尚未安装或未找到客户端配置。"
+    printf '[WARN] 尚未安装或未找到客户端配置。\n'
   fi
 }
 
@@ -1814,11 +1888,11 @@ fetch_latest_archive_sha() {
 detect_update() {
   load_saved_install_info
   if ! command -v curl >/dev/null 2>&1; then
-    log_warn "curl is required to check updates."
+    log_warn "检测更新需要 curl。"
     return 0
   fi
   if ! command -v awk >/dev/null 2>&1; then
-    log_warn "awk is required to check updates."
+    log_warn "检测更新需要 awk。"
     return 0
   fi
 
@@ -1830,28 +1904,28 @@ detect_update() {
   legacy_sha="$(read_env_value RELEASE_SHA256 || true)"
   [[ -n "$current_sha" ]] || current_sha="$legacy_sha"
 
-  [[ -n "$latest_sha" ]] || die "Could not fetch latest release checksum from ${REPO}."
+  [[ -n "$latest_sha" ]] || die "无法获取 ${REPO} 的最新 Release 校验值。"
 
   if [[ -x "$INSTALL_BIN" ]]; then
     current_version="$("$INSTALL_BIN" version 2>&1 || true)"
   else
-    current_version="not installed"
+    current_version="未安装"
   fi
 
   cat <<STATUS
-[INFO] Update check
-  Repo: ${REPO}
-  Saved builder release tag: ${current_tag:-not recorded}
-  Latest release: ${latest_tag:-unknown}
-  Current Caddy: ${current_version}
-  Saved builder asset sha256: ${current_sha:-not recorded}
-  Latest asset sha256: ${latest_sha}
+[INFO] 更新检测
+  Builder 仓库：${REPO}
+  已记录 Builder Release Tag：${current_tag:-未记录}
+  最新 Release：${latest_tag:-未知}
+  当前 Caddy：${current_version}
+  已记录 Builder 资产 sha256：${current_sha:-未记录}
+  最新资产 sha256：${latest_sha}
 STATUS
 
   if [[ -n "$current_sha" && "$current_sha" == "$latest_sha" && ( -z "$latest_tag" || -z "$current_tag" || "$current_tag" == "$latest_tag" ) ]]; then
-    log_ok "Caddy naive binary appears to be up to date."
+    log_ok "当前已是最新版本。"
   else
-    log_warn "A newer or different Builder release asset appears to be available. Choose menu item 4 to update."
+    log_warn "发现可用更新。可选择菜单 4 更新 Caddy naive 内核。"
   fi
 }
 
@@ -1859,9 +1933,9 @@ update_caddy_kernel() {
   local force="${1:-0}"
   require_root
   load_saved_install_info
-  [[ -x "$UPDATE_SCRIPT" ]] || die "Updater not found: $UPDATE_SCRIPT. Run install/reconfigure first."
+  [[ -x "$UPDATE_SCRIPT" ]] || die "未找到更新脚本：$UPDATE_SCRIPT。请先运行安装 / 重新配置。"
   if [[ "$force" -eq 1 ]]; then
-    log_info "Force reinstalling latest Caddy naive binary from ${REPO}."
+    log_info "正在从 ${REPO} 强制重新安装 latest Caddy naive 内核。"
   fi
   "$UPDATE_SCRIPT"
 }
@@ -1975,8 +2049,25 @@ show_fallback_info() {
   Static web root: ${SITE_DIR}
   Static index: ${SITE_DIR}/index.html
   Client config: ${CLIENT_CONFIG}
+  Node link: ${NODE_LINK_FILE}
   Install env: ${ENV_FILE}
   Updater: ${UPDATE_SCRIPT}
+INFO
+
+  cat <<INFO
+
+[INFO] 静态网页目录：
+  ${SITE_DIR}
+
+[INFO] 首页文件：
+  ${SITE_DIR}/index.html
+
+[INFO] 手动上传 HTML/CSS/JS/图片后建议执行：
+  chown -R caddy:caddy ${SITE_DIR}
+  find ${SITE_DIR} -type d -exec chmod 755 {} \;
+  find ${SITE_DIR} -type f -exec chmod 644 {} \;
+  ${INSTALL_BIN} validate --config ${CADDYFILE}
+  systemctl reload ${SERVICE_NAME}
 INFO
 
   if [[ -f "$ENV_FILE" ]]; then
@@ -1986,11 +2077,11 @@ INFO
 [INFO] 当前安装信息
   DOMAIN: ${DOMAIN:-not set}
   SITE_MODE: ${SITE_MODE:-not set}
-  UPSTREAM: ${UPSTREAM:-not set}
+  UPSTREAM: ${UPSTREAM:-未设置}
   REPO: ${REPO:-not set}
   INSTALL_BIN: ${INSTALL_BIN:-not set}
-  BUILDER_RELEASE_TAG: ${builder_tag:-not recorded}
-  BUILDER_RELEASE_SHA256: ${builder_sha:-not recorded}
+  BUILDER_RELEASE_TAG: ${builder_tag:-未记录}
+  BUILDER_RELEASE_SHA256: ${builder_sha:-未记录}
 INFO
   fi
 
@@ -2006,6 +2097,10 @@ INFO
 [INFO] 当前使用本地静态网页回落。你可以修改：
   ${SITE_DIR}/index.html
 修改后执行：
+  chown -R caddy:caddy ${SITE_DIR}
+  find ${SITE_DIR} -type d -exec chmod 755 {} \;
+  find ${SITE_DIR} -type f -exec chmod 644 {} \;
+  ${INSTALL_BIN} validate --config ${CADDYFILE}
   systemctl reload ${SERVICE_NAME}
 INFO
       ;;
@@ -2013,7 +2108,7 @@ INFO
       cat <<INFO
 
 [INFO] 当前使用反代回落。
-  Upstream: ${UPSTREAM:-not set}
+  Upstream: ${UPSTREAM:-未设置}
 如需修改，建议重新运行菜单 1 重新配置。
 INFO
       ;;
@@ -2088,7 +2183,7 @@ run_management_menu() {
         exit 0
         ;;
       *)
-        log_warn "Invalid choice."
+        log_warn "无效选择。"
         pause_for_menu
         ;;
     esac
@@ -2096,25 +2191,37 @@ run_management_menu() {
 }
 
 print_success() {
-  local proxy_url="https://${AUTH_USER}:${AUTH_PASS}@${DOMAIN}"
+  local proxy_url
+  proxy_url="$(build_proxy_url)"
   cat <<EOF
 
-[OK] Installation completed.
+[OK] 安装完成。
 
-NaiveProxy URL:
+NaiveProxy 节点链接：
   ${proxy_url}
 
-Client config saved to ${CLIENT_CONFIG}:
+节点链接文件：
+  ${NODE_LINK_FILE}
+
+客户端 JSON 配置：
+  ${CLIENT_CONFIG}
+
+配置内容：
 {
   "listen": "socks://127.0.0.1:1080",
   "proxy": "${proxy_url}"
 }
 
-Please save the username and password securely. They are stored only in root-readable files:
+说明：
+  NaiveProxy 没有像 VLESS 一样统一的 vless:// 分享标准。
+  这里输出的是 NaiveProxy HTTPS 代理地址，适用于 naive-client-config.json 的 proxy 字段，也方便复制保存。
+
+请妥善保存用户名和密码。以下文件仅 root 可读：
   ${ENV_FILE}
   ${CLIENT_CONFIG}
+  ${NODE_LINK_FILE}
 
-Check status:
+查看状态：
   systemctl status ${SERVICE_NAME}
   journalctl -u ${SERVICE_NAME} -e --no-pager
 EOF
@@ -2122,24 +2229,27 @@ EOF
   if [[ "$SITE_MODE" == "static" ]]; then
     cat <<EOF
 
-Static fallback site:
-  Web root: ${SITE_DIR}
-  Index: ${SITE_DIR}/index.html
+静态回落站点：
+  网站目录：${SITE_DIR}
+  首页文件：${SITE_DIR}/index.html
 
-To customize:
+自定义静态网页：
   nano ${SITE_DIR}/index.html
+  chown -R caddy:caddy ${SITE_DIR}
+  find ${SITE_DIR} -type d -exec chmod 755 {} \;
+  find ${SITE_DIR} -type f -exec chmod 644 {} \;
   systemctl reload ${SERVICE_NAME}
 EOF
   elif [[ "$SITE_MODE" == "reverse" ]]; then
     cat <<EOF
 
-Reverse fallback site:
-  Upstream: ${UPSTREAM_BASE}
-  Upstream host: ${UPSTREAM_HOST}
+反代回落站点：
+  反代目标：${UPSTREAM_BASE}
+  目标主机：${UPSTREAM_HOST}
 
-To change upstream:
-  Re-run this script and choose 1. 一键安装 / 重新配置
-  or edit ${CADDYFILE} carefully, then run:
+修改反代目标：
+  重新运行脚本并选择 1. 一键安装 / 重新配置
+  或谨慎编辑 ${CADDYFILE} 后执行：
   ${INSTALL_BIN} validate --config ${CADDYFILE}
   systemctl reload ${SERVICE_NAME}
 EOF
@@ -2167,6 +2277,7 @@ run_install_flow() {
   write_update_script
   write_env_file
   write_client_config
+  write_node_link_file
 
   if [[ "$AUTO_UPDATE" -eq 1 ]]; then
     write_auto_update_units

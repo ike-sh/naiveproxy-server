@@ -90,8 +90,13 @@ bash install-naive-server.sh --domain example.com --email me@example.com --site-
 修改后执行：
 
 ```bash
+chown -R caddy:caddy /var/www/naive
+find /var/www/naive -type d -exec chmod 755 {} \;
+find /var/www/naive -type f -exec chmod 644 {} \;
 systemctl reload caddy
 ```
+
+如果你手动上传 HTML、CSS、JS、图片等文件，推荐上传后执行上面的权限修复命令，确保 Caddy 的 `caddy` 用户可以正常读取静态文件。
 
 `reverse`：反代一个正常网站作为回落站。
 
@@ -106,6 +111,7 @@ systemctl reload caddy
 - `Static web root: /var/www/naive`
 - `Static index: /var/www/naive/index.html`
 - `Client config: /root/naive-client-config.json`
+- `Node link: /root/naive-node-link.txt`
 - `Install env: /etc/caddy/naive.env`
 - `Updater: /usr/local/bin/update-caddy-naive`
 
@@ -141,8 +147,29 @@ journalctl -u caddy -e --no-pager
 
 安装成功后会保存：
 
+- `/root/naive-node-link.txt`
 - `/root/naive-client-config.json`
 - `/etc/caddy/naive.env`
+
+安装完成后会输出 NaiveProxy 节点链接：
+
+```text
+https://USER:PASS@DOMAIN
+```
+
+节点链接会保存到：
+
+```text
+/root/naive-node-link.txt
+```
+
+JSON 配置保存到：
+
+```text
+/root/naive-client-config.json
+```
+
+NaiveProxy 没有像 VLESS 一样统一的 `vless://` 分享格式。这里提供的是 NaiveProxy HTTPS 代理地址，适用于 `naive-client-config.json` 的 `proxy` 字段，也方便复制保存。
 
 示例：
 
@@ -196,6 +223,7 @@ bash install-naive-server.sh --purge
 - `/var/lib/caddy`
 - `/var/backups/caddy-naive`
 - `/root/naive-client-config.json`
+- `/root/naive-node-link.txt`
 
 执行前需要二次确认。
 
@@ -210,6 +238,7 @@ bash install-naive-server.sh --purge
 - systemd service：`/etc/systemd/system/caddy.service`
 - 更新脚本：`/usr/local/bin/update-caddy-naive`
 - 客户端配置：`/root/naive-client-config.json`
+- 节点链接：`/root/naive-node-link.txt`
 - 安装信息：`/etc/caddy/naive.env`
 
 ## 故障排查
