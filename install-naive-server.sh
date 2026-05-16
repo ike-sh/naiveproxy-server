@@ -4,7 +4,14 @@ set -euo pipefail
 ASSET_NAME="caddy-naive-linux-amd64.tar.gz"
 SHA_ASSET_NAME="caddy-naive-linux-amd64.tar.gz.sha256"
 
-DEFAULT_REPO="ike-sh/caddy-naive-builder"
+SCRIPT_NAME="NaiveProxy Server"
+SCRIPT_VERSION="0.2.0"
+SCRIPT_AUTHOR="ike-sh"
+SCRIPT_GITHUB="https://github.com/ike-sh/naiveproxy-server"
+BUILDER_REPO_DEFAULT="ike-sh/caddy-naive-builder"
+BUILDER_GITHUB="https://github.com/ike-sh/caddy-naive-builder"
+
+DEFAULT_REPO="$BUILDER_REPO_DEFAULT"
 DEFAULT_INSTALL_BIN="/usr/local/bin/caddy"
 DEFAULT_SERVICE_NAME="caddy"
 
@@ -35,12 +42,21 @@ SERVICE_FILE="/etc/systemd/system/${DEFAULT_SERVICE_NAME}.service"
 AUTO_UPDATE=0
 NO_START=0
 INTERACTIVE=0
+MENU_MODE=0
+ACTION_STATUS=0
+ACTION_CHECK_UPDATE=0
+ACTION_UPDATE=0
+ACTION_FORCE_UPDATE=0
+ACTION_SHOW_CLIENT=0
+ACTION_LOGS=0
 DO_UNINSTALL=0
 DO_PURGE=0
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 LAST_BACKUP_PATH=""
 TMP_DIR=""
 DOWNLOADED_CADDY=""
+DOWNLOADED_ARCHIVE_SHA256=""
+DOWNLOADED_RELEASE_TAG=""
 
 log_info() { printf '[INFO] %s\n' "$*"; }
 log_warn() { printf '[WARN] %s\n' "$*" >&2; }
@@ -55,11 +71,36 @@ cleanup() {
 }
 trap cleanup EXIT
 
+print_banner() {
+  cat <<BANNER
+${SCRIPT_NAME} 管理脚本
+作者：${SCRIPT_AUTHOR}
+GitHub：${SCRIPT_GITHUB}
+Builder：${BUILDER_GITHUB}
+BANNER
+}
+
+print_version() {
+  cat <<VERSION
+${SCRIPT_NAME} ${SCRIPT_VERSION}
+作者：${SCRIPT_AUTHOR}
+GitHub：${SCRIPT_GITHUB}
+Builder 仓库：${BUILDER_GITHUB}
+默认 Builder Release：${BUILDER_REPO_DEFAULT}
+VERSION
+}
+
 usage() {
-  cat <<'USAGE'
+  print_banner
+  cat <<USAGE
+
 Usage:
   bash install-naive-server.sh --domain DOMAIN [options]
+  bash install-naive-server.sh --menu
   bash install-naive-server.sh --interactive
+  bash install-naive-server.sh --status
+  bash install-naive-server.sh --check-update
+  bash install-naive-server.sh --update
   bash install-naive-server.sh --uninstall
   bash install-naive-server.sh --purge
 
@@ -72,12 +113,20 @@ Options:
   --pass PASS                  Basic Auth password. Generated or reused if omitted.
   --site-mode static|reverse   Fallback website mode. Default: static.
   --upstream URL               Required when --site-mode reverse.
-  --repo OWNER/REPO            GitHub Release repo. Default: ike-sh/caddy-naive-builder.
+  --repo OWNER/REPO            GitHub Release repo. Default: ${BUILDER_REPO_DEFAULT}.
   --install-bin PATH           Caddy install path. Default: /usr/local/bin/caddy.
   --service-name NAME          systemd service name. Default: caddy.
-  --interactive, -i            Run the interactive installation wizard.
+  --menu                       进入主菜单。
+  --interactive, -i            进入主菜单，不直接进入安装向导。
   --auto-update                Install and enable a daily systemd update timer.
   --no-start                   Write files only; do not enable or start services/timers.
+  --version                    显示脚本版本、作者、GitHub 地址和 Builder 仓库地址。
+  --status                     查看当前安装状态。
+  --check-update               检测 GitHub Release 是否有新 Caddy naive 内核。
+  --update                     更新 Caddy naive 内核。
+  --force-update               强制重新安装 latest Caddy naive 内核。
+  --show-client                显示客户端配置。
+  --logs                       查看 caddy 日志。
   --uninstall                  Uninstall service units and updater; keep config/site/data.
   --purge                      Remove service, updater, binary, config, site and data.
   --help                       Show this help.
@@ -95,7 +144,7 @@ refresh_paths() {
 parse_args() {
   if [[ $# -eq 0 ]]; then
     if [[ -t 0 ]]; then
-      INTERACTIVE=1
+      MENU_MODE=1
       refresh_paths
       return 0
     fi
@@ -150,14 +199,39 @@ parse_args() {
         [[ $# -gt 0 ]] || die "--service-name requires a value."
         SERVICE_NAME="$1"
         ;;
+      --menu)
+        MENU_MODE=1
+        ;;
       --interactive|-i)
-        INTERACTIVE=1
+        MENU_MODE=1
         ;;
       --auto-update)
         AUTO_UPDATE=1
         ;;
       --no-start)
         NO_START=1
+        ;;
+      --version)
+        print_version
+        exit 0
+        ;;
+      --status)
+        ACTION_STATUS=1
+        ;;
+      --check-update)
+        ACTION_CHECK_UPDATE=1
+        ;;
+      --update)
+        ACTION_UPDATE=1
+        ;;
+      --force-update)
+        ACTION_FORCE_UPDATE=1
+        ;;
+      --show-client)
+        ACTION_SHOW_CLIENT=1
+        ;;
+      --logs)
+        ACTION_LOGS=1
         ;;
       --uninstall)
         DO_UNINSTALL=1
@@ -567,6 +641,29 @@ read_env_value() {
   done < "$ENV_FILE"
 }
 
+load_saved_install_info() {
+  local value
+
+  value="$(read_env_value DOMAIN || true)"
+  [[ -n "$value" ]] && DOMAIN="$value"
+  value="$(read_env_value USER || true)"
+  [[ -n "$value" ]] && AUTH_USER="$value"
+  value="$(read_env_value PASS || true)"
+  [[ -n "$value" ]] && AUTH_PASS="$value"
+  value="$(read_env_value SITE_MODE || true)"
+  [[ -n "$value" ]] && SITE_MODE="$value"
+  value="$(read_env_value UPSTREAM || true)"
+  [[ -n "$value" ]] && UPSTREAM="$value"
+  value="$(read_env_value REPO || true)"
+  [[ -n "$value" ]] && REPO="$value"
+  value="$(read_env_value INSTALL_BIN || true)"
+  [[ -n "$value" ]] && INSTALL_BIN="$value"
+  value="$(read_env_value SERVICE_NAME || true)"
+  [[ -n "$value" ]] && SERVICE_NAME="$value"
+
+  refresh_paths
+}
+
 validate_credential_token() {
   local name="$1"
   local value="$2"
@@ -739,6 +836,8 @@ verify_sha256() {
   local expected actual
 
   if (cd "$dir" && sha256sum -c "$SHA_ASSET_NAME" >/dev/null 2>&1); then
+    expected="$(awk '{print $1; exit}' "$sha_file")"
+    DOWNLOADED_ARCHIVE_SHA256="$expected"
     log_ok "SHA256 checksum verified."
     return 0
   fi
@@ -749,6 +848,7 @@ verify_sha256() {
   if [[ "$expected" != "$actual" ]]; then
     die "SHA256 verification failed."
   fi
+  DOWNLOADED_ARCHIVE_SHA256="$expected"
   log_ok "SHA256 checksum verified."
 }
 
@@ -756,6 +856,8 @@ download_release_caddy() {
   check_root_free_space
   TMP_DIR="$(mktemp -d)"
   local archive_url sha_url extract_dir caddy_path
+  DOWNLOADED_RELEASE_TAG="$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" 2>/dev/null || true)"
+  DOWNLOADED_RELEASE_TAG="${DOWNLOADED_RELEASE_TAG##*/}"
   archive_url="https://github.com/${REPO}/releases/latest/download/${ASSET_NAME}"
   sha_url="https://github.com/${REPO}/releases/latest/download/${SHA_ASSET_NAME}"
 
@@ -1113,6 +1215,8 @@ die() { log_error "$*"; exit 1; }
 
 TMP_DIR=""
 LAST_BACKUP_PATH=""
+DOWNLOADED_ARCHIVE_SHA256=""
+DOWNLOADED_RELEASE_TAG=""
 
 cleanup() {
   if [[ -n "$TMP_DIR" && -d "$TMP_DIR" ]]; then
@@ -1237,6 +1341,8 @@ verify_sha256() {
   local expected actual
 
   if (cd "$dir" && sha256sum -c "$SHA_ASSET_NAME" >/dev/null 2>&1); then
+    expected="$(awk '{print $1; exit}' "$sha_file")"
+    DOWNLOADED_ARCHIVE_SHA256="$expected"
     log_ok "SHA256 checksum verified."
     return 0
   fi
@@ -1245,12 +1351,16 @@ verify_sha256() {
   actual="$(sha256sum "$archive" | awk '{print $1}')"
   [[ -n "$expected" ]] || die "SHA256 file is empty or invalid."
   [[ "$expected" == "$actual" ]] || die "SHA256 verification failed."
+  DOWNLOADED_ARCHIVE_SHA256="$expected"
   log_ok "SHA256 checksum verified."
 }
 
 download_release_caddy() {
+  check_root_free_space
   TMP_DIR="$(mktemp -d)"
   local archive_url sha_url extract_dir caddy_path
+  DOWNLOADED_RELEASE_TAG="$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest" 2>/dev/null || true)"
+  DOWNLOADED_RELEASE_TAG="${DOWNLOADED_RELEASE_TAG##*/}"
   archive_url="https://github.com/${REPO}/releases/latest/download/${ASSET_NAME}"
   sha_url="https://github.com/${REPO}/releases/latest/download/${SHA_ASSET_NAME}"
 
@@ -1342,6 +1452,41 @@ reload_or_restart_service() {
   log_ok "Service ${SERVICE_NAME} restarted."
 }
 
+update_env_release_sha() {
+  [[ -n "$DOWNLOADED_ARCHIVE_SHA256" ]] || return 0
+  [[ -f "$ENV_FILE" ]] || return 0
+
+  local tmp_file
+  tmp_file="$(mktemp)"
+  awk -F= '
+    BEGIN { tag_done=0; builder_sha_done=0; release_sha_done=0 }
+    $1 == "BUILDER_RELEASE_TAG" {
+      print "BUILDER_RELEASE_TAG='"${DOWNLOADED_RELEASE_TAG}"'";
+      tag_done=1;
+      next
+    }
+    $1 == "BUILDER_RELEASE_SHA256" {
+      print "BUILDER_RELEASE_SHA256='"${DOWNLOADED_ARCHIVE_SHA256}"'";
+      builder_sha_done=1;
+      next
+    }
+    $1 == "RELEASE_SHA256" {
+      print "RELEASE_SHA256='"${DOWNLOADED_ARCHIVE_SHA256}"'";
+      release_sha_done=1;
+      next
+    }
+    { print }
+    END {
+      if (!tag_done) print "BUILDER_RELEASE_TAG='"${DOWNLOADED_RELEASE_TAG}"'";
+      if (!builder_sha_done) print "BUILDER_RELEASE_SHA256='"${DOWNLOADED_ARCHIVE_SHA256}"'";
+      if (!release_sha_done) print "RELEASE_SHA256='"${DOWNLOADED_ARCHIVE_SHA256}"'";
+    }
+  ' "$ENV_FILE" > "$tmp_file"
+  install -m 600 "$tmp_file" "$ENV_FILE"
+  rm -f "$tmp_file"
+  log_ok "Updated ${ENV_FILE} release checksum."
+}
+
 main() {
   require_root
   require_amd64
@@ -1349,6 +1494,7 @@ main() {
   require_command curl
   require_command tar
   require_command sha256sum
+  require_command awk
   require_command mktemp
   require_command find
   require_command install
@@ -1358,6 +1504,7 @@ main() {
   download_release_caddy
   install_binary
   validate_caddyfile
+  update_env_release_sha
   reload_or_restart_service
   log_ok "Caddy naive binary update completed."
 }
@@ -1394,6 +1541,9 @@ UPSTREAM=${UPSTREAM_BASE}
 REPO=${REPO}
 INSTALL_BIN=${INSTALL_BIN}
 SERVICE_NAME=${SERVICE_NAME}
+BUILDER_RELEASE_TAG=${DOWNLOADED_RELEASE_TAG}
+BUILDER_RELEASE_SHA256=${DOWNLOADED_ARCHIVE_SHA256}
+RELEASE_SHA256=${DOWNLOADED_ARCHIVE_SHA256}
 INSTALLED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 ENV
   chmod 600 "$ENV_FILE"
@@ -1489,9 +1639,14 @@ uninstall_service() {
   confirm_or_exit "uninstall" "This will stop and remove the service units and updater. It will keep /etc/caddy, /var/www/naive and /var/lib/caddy."
 
   stop_disable_unit_if_present "${SERVICE_NAME}.service"
+  stop_disable_unit_if_present "caddy.service"
+  stop_disable_unit_if_present "caddy-naive-update.service"
   stop_disable_unit_if_present "caddy-naive-update.timer"
 
   remove_file_with_backup "$SERVICE_FILE"
+  if [[ "$SERVICE_FILE" != "/etc/systemd/system/caddy.service" ]]; then
+    remove_file_with_backup "/etc/systemd/system/caddy.service"
+  fi
   remove_file_with_backup "$AUTO_UPDATE_SERVICE_FILE"
   remove_file_with_backup "$AUTO_UPDATE_TIMER_FILE"
   remove_file_with_backup "$UPDATE_SCRIPT"
@@ -1501,8 +1656,22 @@ uninstall_service() {
 }
 
 purge_all() {
-  confirm_or_exit "purge" "This will remove the service, updater, Caddy binary, /etc/caddy, /var/www/naive and /var/lib/caddy."
-  confirm_or_exit "DELETE" "Second confirmation required. This action is destructive."
+  local answer
+
+  printf '确认完全卸载？[y/N] '
+  IFS= read -r answer || die "Cancelled."
+  case "${answer,,}" in
+    y|yes) ;;
+    *) die "Cancelled." ;;
+  esac
+
+  if [[ ! -f "$ENV_FILE" ]]; then
+    log_warn "${ENV_FILE} 不存在，当前机器上可能存在非本脚本管理的 Caddy 配置。"
+  fi
+
+  printf '请输入 DELETE 确认完全删除：'
+  IFS= read -r answer || die "Cancelled."
+  [[ "$answer" == "DELETE" ]] || die "Cancelled."
 
   stop_disable_unit_if_present "${SERVICE_NAME}.service"
   stop_disable_unit_if_present "caddy-naive-update.timer"
@@ -1520,10 +1689,285 @@ purge_all() {
   remove_file_with_backup "$AUTO_UPDATE_TIMER_FILE"
   remove_file_with_backup "$UPDATE_SCRIPT"
   remove_file_with_backup "$INSTALL_BIN"
+  if [[ "$INSTALL_BIN" != "/usr/local/bin/caddy" ]]; then
+    remove_file_with_backup "/usr/local/bin/caddy"
+  fi
+  remove_file_with_backup "$CLIENT_CONFIG"
 
   rm -rf "$CONFIG_DIR" "$SITE_DIR" "$DATA_DIR"
+  rm -rf "$BACKUP_DIR"
   systemctl daemon-reload
   log_ok "Purge completed."
+}
+
+show_current_status() {
+  load_saved_install_info
+
+  cat <<STATUS
+[INFO] Current configuration
+  Domain: ${DOMAIN:-not set}
+  User: ${AUTH_USER:-not set}
+  Site mode: ${SITE_MODE:-not set}
+  Upstream: ${UPSTREAM:-not set}
+  Repo: ${REPO}
+  Caddy binary: ${INSTALL_BIN}
+  Service: ${SERVICE_NAME}
+STATUS
+
+  if [[ -x "$INSTALL_BIN" ]]; then
+    "$INSTALL_BIN" version || true
+    if "$INSTALL_BIN" list-modules 2>/dev/null | grep -Eiq 'forward_proxy|forwardproxy'; then
+      log_ok "forward_proxy module detected."
+    else
+      log_warn "forward_proxy module was not detected by list-modules."
+    fi
+  else
+    log_warn "Caddy binary not found or not executable: $INSTALL_BIN"
+  fi
+
+  if command -v systemctl >/dev/null 2>&1; then
+    systemctl --no-pager --full status "$SERVICE_NAME" || true
+    if systemctl is-enabled --quiet caddy-naive-update.timer 2>/dev/null; then
+      log_ok "Auto-update timer is enabled."
+    else
+      log_warn "Auto-update timer is not enabled."
+    fi
+  else
+    log_warn "systemctl is not available."
+  fi
+}
+
+show_client_config() {
+  local found=0
+  load_saved_install_info
+
+  if [[ -f "$CLIENT_CONFIG" ]]; then
+    found=1
+    if [[ -r "$CLIENT_CONFIG" ]]; then
+      cat <<CONFIG
+[INFO] Client config: ${CLIENT_CONFIG}
+CONFIG
+      cat "$CLIENT_CONFIG"
+      printf '\n'
+    else
+      log_warn "Client config exists but is not readable: $CLIENT_CONFIG"
+    fi
+  fi
+
+  if [[ -f "$ENV_FILE" ]]; then
+    found=1
+    if [[ -n "$DOMAIN" && -n "$AUTH_USER" && -n "$AUTH_PASS" ]]; then
+      cat <<URL
+[INFO] NaiveProxy URL:
+  https://${AUTH_USER}:${AUTH_PASS}@${DOMAIN}
+URL
+    else
+      log_warn "${ENV_FILE} exists, but DOMAIN/USER/PASS is incomplete or unreadable."
+    fi
+  fi
+
+  if [[ "$found" -eq 0 ]]; then
+    log_warn "尚未安装或未找到客户端配置。"
+  fi
+}
+
+unit_exists() {
+  local unit="$1"
+  systemctl list-unit-files "$unit" --no-legend 2>/dev/null | grep -q . \
+    || systemctl status "$unit" >/dev/null 2>&1
+}
+
+show_caddy_logs() {
+  if ! command -v systemctl >/dev/null 2>&1 || ! command -v journalctl >/dev/null 2>&1; then
+    log_warn "systemctl/journalctl is not available."
+    return 0
+  fi
+
+  if unit_exists "caddy.service"; then
+    journalctl -u caddy -e --no-pager
+  else
+    log_warn "尚未安装：未找到 caddy.service。"
+  fi
+}
+
+fetch_latest_release_tag() {
+  local latest_url
+  latest_url="$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/${REPO}/releases/latest")"
+  printf '%s\n' "${latest_url##*/}"
+}
+
+fetch_latest_archive_sha() {
+  curl -fsSL "https://github.com/${REPO}/releases/latest/download/${SHA_ASSET_NAME}" | awk '{print $1; exit}'
+}
+
+detect_update() {
+  load_saved_install_info
+  if ! command -v curl >/dev/null 2>&1; then
+    log_warn "curl is required to check updates."
+    return 0
+  fi
+  if ! command -v awk >/dev/null 2>&1; then
+    log_warn "awk is required to check updates."
+    return 0
+  fi
+
+  local latest_tag latest_sha current_tag current_sha legacy_sha current_version
+  latest_tag="$(fetch_latest_release_tag || true)"
+  latest_sha="$(fetch_latest_archive_sha || true)"
+  current_tag="$(read_env_value BUILDER_RELEASE_TAG || true)"
+  current_sha="$(read_env_value BUILDER_RELEASE_SHA256 || true)"
+  legacy_sha="$(read_env_value RELEASE_SHA256 || true)"
+  [[ -n "$current_sha" ]] || current_sha="$legacy_sha"
+
+  [[ -n "$latest_sha" ]] || die "Could not fetch latest release checksum from ${REPO}."
+
+  if [[ -x "$INSTALL_BIN" ]]; then
+    current_version="$("$INSTALL_BIN" version 2>&1 || true)"
+  else
+    current_version="not installed"
+  fi
+
+  cat <<STATUS
+[INFO] Update check
+  Repo: ${REPO}
+  Saved builder release tag: ${current_tag:-not recorded}
+  Latest release: ${latest_tag:-unknown}
+  Current Caddy: ${current_version}
+  Saved builder asset sha256: ${current_sha:-not recorded}
+  Latest asset sha256: ${latest_sha}
+STATUS
+
+  if [[ -n "$current_sha" && "$current_sha" == "$latest_sha" && ( -z "$latest_tag" || -z "$current_tag" || "$current_tag" == "$latest_tag" ) ]]; then
+    log_ok "Caddy naive binary appears to be up to date."
+  else
+    log_warn "A newer or different Builder release asset appears to be available. Choose menu item 4 to update."
+  fi
+}
+
+update_caddy_kernel() {
+  local force="${1:-0}"
+  require_root
+  load_saved_install_info
+  [[ -x "$UPDATE_SCRIPT" ]] || die "Updater not found: $UPDATE_SCRIPT. Run install/reconfigure first."
+  if [[ "$force" -eq 1 ]]; then
+    log_info "Force reinstalling latest Caddy naive binary from ${REPO}."
+  fi
+  "$UPDATE_SCRIPT"
+}
+
+toggle_auto_update() {
+  require_root
+  load_saved_install_info
+  command -v systemctl >/dev/null 2>&1 || die "systemctl is required."
+
+  if systemctl is-enabled --quiet caddy-naive-update.timer 2>/dev/null || systemctl is-active --quiet caddy-naive-update.timer 2>/dev/null; then
+    if prompt_yes_no "自动更新当前已启用，是否关闭？" "N"; then
+      systemctl disable --now caddy-naive-update.timer
+      log_ok "Auto-update timer disabled."
+    else
+      log_warn "No changes made."
+    fi
+    return 0
+  fi
+
+  if prompt_yes_no "自动更新当前未启用，是否启用？" "Y"; then
+    write_update_script
+    NO_START=0
+    write_auto_update_units
+  else
+    log_warn "No changes made."
+  fi
+}
+
+pause_for_menu() {
+  local _
+  printf '\n按 Enter 返回菜单...'
+  IFS= read -r _ || true
+}
+
+print_management_menu() {
+  cat <<MENU
+${SCRIPT_NAME} 管理菜单
+作者：${SCRIPT_AUTHOR}
+GitHub：${SCRIPT_GITHUB}
+Builder：${BUILDER_GITHUB}
+-------------------------------------------------
+1. 一键安装 / 重新配置
+2. 查看当前状态
+3. 检测更新
+4. 更新 Caddy naive 内核
+5. 自动更新管理
+6. 卸载服务，保留配置
+7. 完全卸载所有文件
+8. 显示客户端配置
+9. 查看运行日志
+0. 退出
+MENU
+}
+
+run_management_menu() {
+  local choice
+
+  while true; do
+    printf '\n'
+    print_management_menu
+    printf '\n请选择：'
+    IFS= read -r choice || exit 0
+
+    case "$choice" in
+      1)
+        require_root
+        load_saved_install_info
+        INTERACTIVE=1
+        run_interactive_wizard
+        run_install_flow
+        pause_for_menu
+        ;;
+      2)
+        show_current_status
+        pause_for_menu
+        ;;
+      3)
+        detect_update
+        pause_for_menu
+        ;;
+      4)
+        update_caddy_kernel
+        pause_for_menu
+        ;;
+      5)
+        toggle_auto_update
+        pause_for_menu
+        ;;
+      6)
+        require_root
+        load_saved_install_info
+        uninstall_service
+        pause_for_menu
+        ;;
+      7)
+        require_root
+        load_saved_install_info
+        purge_all
+        pause_for_menu
+        ;;
+      8)
+        show_client_config
+        pause_for_menu
+        ;;
+      9)
+        show_caddy_logs
+        pause_for_menu
+        ;;
+      0)
+        exit 0
+        ;;
+      *)
+        log_warn "Invalid choice."
+        pause_for_menu
+        ;;
+    esac
+  done
 }
 
 print_success() {
@@ -1551,25 +1995,7 @@ Check status:
 EOF
 }
 
-main() {
-  parse_args "$@"
-
-  if [[ "$DO_PURGE" -eq 1 ]]; then
-    require_root
-    purge_all
-    exit 0
-  fi
-
-  if [[ "$DO_UNINSTALL" -eq 1 ]]; then
-    require_root
-    uninstall_service
-    exit 0
-  fi
-
-  if [[ "$INTERACTIVE" -eq 1 ]]; then
-    run_interactive_wizard
-  fi
-
+run_install_flow() {
   require_root
   require_supported_os
   require_amd64
@@ -1597,6 +2023,41 @@ main() {
 
   start_or_reload_service
   print_success
+}
+
+main() {
+  parse_args "$@"
+
+  if [[ "$DO_PURGE" -eq 1 ]]; then
+    require_root
+    load_saved_install_info
+    purge_all
+    exit 0
+  fi
+
+  if [[ "$DO_UNINSTALL" -eq 1 ]]; then
+    require_root
+    load_saved_install_info
+    uninstall_service
+    exit 0
+  fi
+
+  if [[ "$ACTION_STATUS" -eq 1 || "$ACTION_CHECK_UPDATE" -eq 1 || "$ACTION_UPDATE" -eq 1 || "$ACTION_FORCE_UPDATE" -eq 1 || "$ACTION_SHOW_CLIENT" -eq 1 || "$ACTION_LOGS" -eq 1 ]]; then
+    [[ "$ACTION_STATUS" -eq 1 ]] && show_current_status
+    [[ "$ACTION_CHECK_UPDATE" -eq 1 ]] && detect_update
+    [[ "$ACTION_UPDATE" -eq 1 ]] && update_caddy_kernel 0
+    [[ "$ACTION_FORCE_UPDATE" -eq 1 ]] && update_caddy_kernel 1
+    [[ "$ACTION_SHOW_CLIENT" -eq 1 ]] && show_client_config
+    [[ "$ACTION_LOGS" -eq 1 ]] && show_caddy_logs
+    exit 0
+  fi
+
+  if [[ "$MENU_MODE" -eq 1 ]]; then
+    run_management_menu
+    exit 0
+  fi
+
+  run_install_flow
 }
 
 main "$@"
