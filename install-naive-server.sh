@@ -42,6 +42,8 @@ SERVICE_FILE="/etc/systemd/system/${DEFAULT_SERVICE_NAME}.service"
 CERT_MODE="acme-standalone"
 CERT_FULLCHAIN=""
 CERT_KEY=""
+HTTP3="off"
+PROBE_RESISTANCE="on"
 
 AUTO_UPDATE=0
 NO_START=0
@@ -57,6 +59,10 @@ ACTION_ISSUE_CERT=0
 ACTION_TLS_DIAGNOSE=0
 ACTION_CHANGE_USER=0
 ACTION_CHANGE_PASS=0
+ACTION_HTTP3_TOGGLE=0
+ACTION_PROBE_TOGGLE=0
+ACTION_PROXY_SELF_TEST=0
+ACTION_FIX_STATIC_PERMS=0
 SET_USER_VALUE=""
 SET_PASS_VALUE=""
 DO_UNINSTALL=0
@@ -67,6 +73,7 @@ TMP_DIR=""
 DOWNLOADED_CADDY=""
 DOWNLOADED_ARCHIVE_SHA256=""
 DOWNLOADED_RELEASE_TAG=""
+DOWNLOADED_RELEASE_URL=""
 LAST_CADDYFILE_BACKUP_FOR_RESTORE=""
 
 log_info() { printf '[INFO] %s\n' "$*"; }
@@ -125,6 +132,11 @@ usage() {
   --site-mode static|reverse   回落网站模式，默认 static。
   --upstream URL               reverse 模式必填。
   --cert-mode MODE             证书模式：caddy-auto、caddy-zerossl 或 acme-standalone，默认 acme-standalone。
+  --http3 on|off               HTTP/3 开关，默认 off。
+  --enable-http3               启用 HTTP/3，等价于 --http3 on。
+  --disable-http3              关闭 HTTP/3，等价于 --http3 off。
+  --no-probe-resistance        临时关闭 probe_resistance，仅建议排查时使用；无 --domain 时会修改当前安装配置。
+  --enable-probe-resistance    重新开启 probe_resistance。
   --repo OWNER/REPO            GitHub Release 仓库，默认：${BUILDER_REPO_DEFAULT}。
   --install-bin PATH           Caddy 安装路径，默认：/usr/local/bin/caddy。
   --service-name NAME          systemd 服务名，默认：caddy。
@@ -144,6 +156,8 @@ usage() {
   --change-pass                交互式修改认证密码。
   --set-user USER              非交互设置认证用户名。
   --set-pass PASS              非交互设置认证密码。
+  --proxy-self-test            执行代理核心自检。
+  --fix-static-perms           修复静态站目录权限并重启 Caddy。
   --logs                       查看 caddy 日志。
   --uninstall                  卸载服务和更新脚本，保留配置、站点和数据。
   --purge                      完全卸载服务、更新脚本、二进制、配置、站点和数据。
@@ -302,6 +316,28 @@ parse_args() {
         [[ $# -gt 0 ]] || die "--cert-mode 需要一个值。"
         CERT_MODE="$1"
         ;;
+      --http3)
+        shift
+        [[ $# -gt 0 ]] || die "--http3 需要一个值。"
+        HTTP3="$1"
+        ACTION_HTTP3_TOGGLE=1
+        ;;
+      --enable-http3)
+        HTTP3="on"
+        ACTION_HTTP3_TOGGLE=1
+        ;;
+      --disable-http3)
+        HTTP3="off"
+        ACTION_HTTP3_TOGGLE=1
+        ;;
+      --no-probe-resistance)
+        PROBE_RESISTANCE="off"
+        ACTION_PROBE_TOGGLE=1
+        ;;
+      --enable-probe-resistance)
+        PROBE_RESISTANCE="on"
+        ACTION_PROBE_TOGGLE=1
+        ;;
       --repo)
         shift
         [[ $# -gt 0 ]] || die "--repo 需要一个值。"
@@ -370,6 +406,12 @@ parse_args() {
         [[ $# -gt 0 ]] || die "--set-pass 需要一个值。"
         SET_PASS_VALUE="$1"
         ;;
+      --proxy-self-test)
+        ACTION_PROXY_SELF_TEST=1
+        ;;
+      --fix-static-perms)
+        ACTION_FIX_STATIC_PERMS=1
+        ;;
       --logs)
         ACTION_LOGS=1
         ;;
@@ -419,7 +461,7 @@ prompt_text() {
     fi
 
     if [[ "$required" == "required" && -z "$value" ]]; then
-      log_warn "${label} cannot be empty."
+      log_warn "${label} 不能为空。"
       continue
     fi
 
@@ -534,6 +576,35 @@ prompt_cert_mode() {
   done
 }
 
+prompt_http3_mode() {
+  local input
+
+  while true; do
+    printf '是否启用 HTTP/3？\n'
+    printf '  1) off - 关闭 HTTP/3，只使用 HTTP/1.1 + HTTP/2，推荐，最稳\n'
+    printf '  2) on  - 开启 HTTP/3，需要 UDP 443 放行，实验功能\n'
+    printf '请选择 [1/2/on/off，回车默认 %s]: ' "${HTTP3:-off}"
+    IFS= read -r input || die "输入已取消。"
+    case "$input" in
+      "")
+        [[ "$HTTP3" == "on" || "$HTTP3" == "off" ]] || HTTP3="off"
+        return 0
+        ;;
+      1|off|OFF)
+        HTTP3="off"
+        return 0
+        ;;
+      2|on|ON)
+        HTTP3="on"
+        return 0
+        ;;
+      *)
+        log_warn "请选择 on 或 off。"
+        ;;
+    esac
+  done
+}
+
 prompt_yes_no() {
   local question="$1"
   local default="$2"
@@ -597,6 +668,7 @@ print_install_summary() {
   回落模式：${SITE_MODE}
   反代目标：${upstream_label}
   证书模式：${CERT_MODE}
+  HTTP3：${HTTP3}
   自动更新：${auto_update_label}
   立即启动服务：${start_label}
 SUMMARY
@@ -630,6 +702,7 @@ TITLE
     log_warn "acme-standalone 模式需要邮箱用于注册 ZeroSSL 账户。"
     prompt_text EMAIL "ACME 邮箱 EMAIL" "required" "示例：me@example.com"
   fi
+  prompt_http3_mode
   prompt_text AUTH_USER "认证用户名 USER，可选" "optional"
   prompt_password
   prompt_site_mode
@@ -731,7 +804,7 @@ check_root_free_space() {
   fi
 
   if (( available < 300 )); then
-    log_error "Root filesystem has less than 300MB free space."
+    log_error "根分区可用空间不足 300MB。"
     print_disk_cleanup_hint
     exit 1
   fi
@@ -783,6 +856,8 @@ validate_domain() {
 validate_common_args() {
   [[ "$SITE_MODE" == "static" || "$SITE_MODE" == "reverse" ]] || die "--site-mode 必须是 static 或 reverse。"
   [[ "$CERT_MODE" == "caddy-auto" || "$CERT_MODE" == "caddy-zerossl" || "$CERT_MODE" == "acme-standalone" ]] || die "--cert-mode 必须是 caddy-auto、caddy-zerossl 或 acme-standalone。"
+  [[ "$HTTP3" == "on" || "$HTTP3" == "off" ]] || die "--http3 必须是 on 或 off。"
+  [[ "$PROBE_RESISTANCE" == "on" || "$PROBE_RESISTANCE" == "off" ]] || die "PROBE_RESISTANCE 必须是 on 或 off。"
   [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "--repo 必须是 OWNER/REPO 格式。"
   [[ "$INSTALL_BIN" == /* ]] || die "--install-bin 必须是绝对路径。"
   [[ "$INSTALL_BIN" != *[[:space:]]* ]] || die "--install-bin 不能包含空白字符。"
@@ -865,6 +940,10 @@ load_saved_install_info() {
   [[ -n "$value" ]] && CERT_FULLCHAIN="$value"
   value="$(read_env_value CERT_KEY || true)"
   [[ -n "$value" ]] && CERT_KEY="$value"
+  value="$(read_env_value HTTP3 || true)"
+  [[ -n "$value" ]] && HTTP3="$value"
+  value="$(read_env_value PROBE_RESISTANCE || true)"
+  [[ -n "$value" ]] && PROBE_RESISTANCE="$value"
   value="$(read_env_value BUILDER_RELEASE_TAG || true)"
   [[ -n "$value" ]] && DOWNLOADED_RELEASE_TAG="$value"
   value="$(read_env_value BUILDER_RELEASE_SHA256 || true)"
@@ -880,8 +959,8 @@ validate_credential_token() {
   local name="$1"
   local value="$2"
   [[ -n "$value" ]] || die "${name} 不能为空。"
-  if [[ ! "$value" =~ ^[A-Za-z0-9._~:/@+-]+$ ]]; then
-    die "${name} 只能包含 A-Z、a-z、0-9、点号、下划线、波浪线、冒号、斜杠、@、加号和连字符。"
+  if [[ ! "$value" =~ ^[A-Za-z0-9._:/@+-]+$ ]]; then
+    die "${name} 只能包含 A-Z、a-z、0-9、点号、下划线、冒号、斜杠、@、加号和连字符。"
   fi
 }
 
@@ -1062,7 +1141,7 @@ verify_sha256() {
 
   expected="$(awk '{print $1; exit}' "$sha_file")"
   actual="$(sha256sum "$archive" | awk '{print $1}')"
-  [[ -n "$expected" ]] || die "SHA256 file is empty or invalid."
+  [[ -n "$expected" ]] || die "SHA256 文件为空或无效。"
   if [[ "$expected" != "$actual" ]]; then
     die "SHA256 校验失败。"
   fi
@@ -1078,6 +1157,7 @@ download_release_caddy() {
   DOWNLOADED_RELEASE_TAG="${DOWNLOADED_RELEASE_TAG##*/}"
   archive_url="https://github.com/${REPO}/releases/latest/download/${ASSET_NAME}"
   sha_url="https://github.com/${REPO}/releases/latest/download/${SHA_ASSET_NAME}"
+  DOWNLOADED_RELEASE_URL="https://github.com/${REPO}/releases/latest"
 
   log_info "正在下载 $archive_url"
   curl -fL --retry 3 --connect-timeout 20 -o "${TMP_DIR}/${ASSET_NAME}" "$archive_url"
@@ -1301,7 +1381,7 @@ fix_static_site_permissions() {
 }
 
 write_caddyfile_content() {
-  local order_mode="$1"
+  local output_path="$1"
   local tls_mode="${2:-$CERT_MODE}"
   local auth_user_caddy auth_pass_caddy
   auth_user_caddy="$(caddyfile_quote "$AUTH_USER")"
@@ -1315,63 +1395,66 @@ write_caddyfile_content() {
 
   {
     printf '{\n'
-    if [[ "$order_mode" == "strict" ]]; then
-      printf '  order forward_proxy before file_server\n'
-      printf '  order forward_proxy before reverse_proxy\n'
-    else
-      printf '  order forward_proxy first\n'
-    fi
+    printf '  order forward_proxy before file_server\n'
+    printf '  order forward_proxy before reverse_proxy\n'
     if [[ "$tls_mode" == "caddy-zerossl" ]]; then
       printf '  acme_ca https://acme.zerossl.com/v2/DV90\n'
     fi
     printf '  admin off\n'
+    printf '  servers {\n'
+    if [[ "$HTTP3" == "on" ]]; then
+      printf '    protocols h1 h2 h3\n'
+    else
+      printf '    protocols h1 h2\n'
+    fi
+    printf '  }\n'
     printf '}\n\n'
+    printf 'http://%s {\n' "$DOMAIN"
+    printf '  redir https://{host}{uri} permanent\n'
+    printf '}\n\n'
+    printf ':443, %s {\n' "$DOMAIN"
+    printf '  encode zstd gzip\n\n'
     if [[ "$tls_mode" == "acme-standalone" ]]; then
-      printf 'http://%s {\n' "$DOMAIN"
-      printf '  redir https://{host}{uri} permanent\n'
-      printf '}\n\n'
-    fi
-    printf '%s {\n' "$DOMAIN"
-    printf '  encode zstd gzip\n'
-    if [[ "$tls_mode" == "acme-standalone" ]]; then
-      printf '  tls %s %s\n' "$CERT_FULLCHAIN" "$CERT_KEY"
+      printf '  tls %s %s\n\n' "$CERT_FULLCHAIN" "$CERT_KEY"
     elif [[ -n "$EMAIL" ]]; then
-      printf '  tls %s\n' "$EMAIL"
+      printf '  tls %s\n\n' "$EMAIL"
     fi
-    printf '\n'
-    printf '  forward_proxy {\n'
-    printf '    basic_auth %s %s\n' "$auth_user_caddy" "$auth_pass_caddy"
-    printf '    hide_ip\n'
-    printf '    hide_via\n'
-    printf '    probe_resistance\n'
-    printf '  }\n\n'
+    printf '  route {\n'
+    printf '    forward_proxy {\n'
+    printf '      basic_auth %s %s\n' "$auth_user_caddy" "$auth_pass_caddy"
+    printf '      hide_ip\n'
+    printf '      hide_via\n'
+    if [[ "$PROBE_RESISTANCE" == "on" ]]; then
+      printf '      probe_resistance\n'
+    fi
+    printf '    }\n\n'
 
     if [[ "$SITE_MODE" == "static" ]]; then
-      printf '  root * %s\n' "$SITE_DIR"
-      printf '  file_server\n'
+      printf '    root * %s\n' "$SITE_DIR"
+      printf '    file_server\n'
     else
-      printf '  reverse_proxy %s {\n' "$UPSTREAM_BASE"
-      printf '    header_up Host %s\n' "$UPSTREAM_HOST"
-      printf '    header_up X-Forwarded-Host {host}\n'
-      printf '    header_up X-Forwarded-Proto {scheme}\n'
-      printf '    transport http {\n'
-      printf '      tls_server_name %s\n' "$UPSTREAM_HOST"
+      printf '    reverse_proxy %s {\n' "$UPSTREAM_BASE"
+      printf '      header_up Host %s\n' "$UPSTREAM_HOST"
+      printf '      header_up X-Forwarded-Host {host}\n'
+      printf '      header_up X-Forwarded-Proto {scheme}\n'
+      printf '      transport http {\n'
+      printf '        tls_server_name %s\n' "$UPSTREAM_HOST"
+      printf '      }\n'
       printf '    }\n'
-      printf '  }\n'
     fi
+    printf '  }\n'
     printf '}\n'
-  } > "$CADDYFILE"
-
-  chown root:caddy "$CADDYFILE"
-  chmod 640 "$CADDYFILE"
+  } > "$output_path"
 }
 
 validate_caddyfile() {
+  local config_path="${1:-$CADDYFILE}"
   local output_file
+  [[ -f "$config_path" ]] || die "未找到 Caddyfile：$config_path"
   output_file="$(mktemp)"
-  if "$INSTALL_BIN" validate --config "$CADDYFILE" >"$output_file" 2>&1; then
+  if "$INSTALL_BIN" validate --config "$config_path" >"$output_file" 2>&1; then
     rm -f "$output_file"
-    log_ok "Caddyfile 校验通过。"
+    log_ok "Caddyfile 校验通过：$config_path"
     return 0
   fi
 
@@ -1384,28 +1467,34 @@ validate_caddyfile() {
 write_and_validate_caddyfile() {
   local tls_mode="${1:-$CERT_MODE}"
   local caddyfile_backup=""
+  local tmp_caddyfile
+
   backup_file "$CADDYFILE"
   caddyfile_backup="$LAST_BACKUP_PATH"
   LAST_CADDYFILE_BACKUP_FOR_RESTORE="$caddyfile_backup"
 
-  write_caddyfile_content "strict" "$tls_mode"
-  if validate_caddyfile; then
+  tmp_caddyfile="$(mktemp /tmp/Caddyfile.XXXXXX)"
+  write_caddyfile_content "$tmp_caddyfile" "$tls_mode"
+  "$INSTALL_BIN" fmt --overwrite "$tmp_caddyfile" >/dev/null 2>&1 || log_warn "Caddyfile fmt 失败，将继续 validate 详细检查。"
+
+  if validate_caddyfile "$tmp_caddyfile"; then
+    if ! mv -f "$tmp_caddyfile" "$CADDYFILE"; then
+      rm -f "$tmp_caddyfile"
+      restore_caddyfile_backup || true
+      die "覆盖 Caddyfile 失败。"
+    fi
+    chmod 640 "$CADDYFILE"
+    chown root:caddy "$CADDYFILE" 2>/dev/null || true
     return 0
   fi
 
-  log_warn "正在改用等价的单条 order 指令重试：order forward_proxy first。"
-  write_caddyfile_content "first" "$tls_mode"
-  if validate_caddyfile; then
-    return 0
-  fi
-
+  rm -f "$tmp_caddyfile"
   if [[ -n "$caddyfile_backup" ]]; then
     cp -a "$caddyfile_backup" "$CADDYFILE"
     log_warn "已从备份恢复旧 Caddyfile：$caddyfile_backup"
     die "Caddyfile 校验失败。备份位于：$caddyfile_backup"
   fi
 
-  rm -f "$CADDYFILE"
   die "Caddyfile 校验失败，且没有可用的旧 Caddyfile 备份。"
 }
 
@@ -1421,6 +1510,60 @@ restore_caddyfile_backup() {
 
 cert_files_ready() {
   [[ -s "$CERT_FULLCHAIN" && -s "$CERT_KEY" ]]
+}
+
+cert_exists() {
+  refresh_cert_paths
+  cert_files_ready
+}
+
+cert_days_left() {
+  local end_date end_ts now_ts days
+  refresh_cert_paths
+  [[ -s "$CERT_FULLCHAIN" ]] || return 1
+  command -v openssl >/dev/null 2>&1 || return 1
+  end_date="$(openssl x509 -in "$CERT_FULLCHAIN" -noout -enddate 2>/dev/null | sed 's/^notAfter=//')" || return 1
+  [[ -n "$end_date" ]] || return 1
+
+  if date -d "$end_date" +%s >/dev/null 2>&1; then
+    end_ts="$(date -d "$end_date" +%s)"
+  elif date -j -f "%b %e %T %Y %Z" "$end_date" +%s >/dev/null 2>&1; then
+    end_ts="$(date -j -f "%b %e %T %Y %Z" "$end_date" +%s)"
+  else
+    return 1
+  fi
+  now_ts="$(date +%s)"
+  days=$(( (end_ts - now_ts) / 86400 ))
+  printf '%s\n' "$days"
+}
+
+should_issue_cert() {
+  local old_domain days_left
+  refresh_cert_paths
+  old_domain="$(read_env_value DOMAIN || true)"
+
+  if [[ -n "$old_domain" && "$old_domain" != "$DOMAIN" ]]; then
+    log_warn "域名已变化，需要重新签发本地证书。"
+    return 0
+  fi
+
+  if ! cert_exists; then
+    log_warn "本地证书文件缺失或为空，需要重新签发。"
+    return 0
+  fi
+
+  if ! days_left="$(cert_days_left)"; then
+    log_warn "无法解析本地证书有效期，需要重新签发。"
+    return 0
+  fi
+
+  if (( days_left <= 15 )); then
+    log_warn "本地证书剩余有效期不超过 15 天，需要重新签发。"
+    return 0
+  fi
+
+  log_ok "已复用现有本地证书，剩余有效期约 ${days_left} 天。"
+  return 1
 }
 
 write_caddyfile_local_cert() {
@@ -1663,7 +1806,7 @@ check_root_free_space() {
   fi
 
   if (( available < 300 )); then
-    log_error "Root filesystem has less than 300MB free space."
+    log_error "根分区可用空间不足 300MB。"
     print_disk_cleanup_hint
     exit 1
   fi
@@ -1839,7 +1982,7 @@ update_env_release_sha() {
   local tmp_file
   tmp_file="$(mktemp)"
   awk -F= '
-    BEGIN { tag_done=0; builder_sha_done=0; release_sha_done=0 }
+    BEGIN { tag_done=0; builder_sha_done=0; url_done=0; updated_done=0 }
     $1 == "BUILDER_RELEASE_TAG" {
       print "BUILDER_RELEASE_TAG='"${DOWNLOADED_RELEASE_TAG}"'";
       tag_done=1;
@@ -1850,16 +1993,22 @@ update_env_release_sha() {
       builder_sha_done=1;
       next
     }
-    $1 == "RELEASE_SHA256" {
-      print "RELEASE_SHA256='"${DOWNLOADED_ARCHIVE_SHA256}"'";
-      release_sha_done=1;
+    $1 == "BUILDER_RELEASE_URL" {
+      print "BUILDER_RELEASE_URL=https://github.com/'"${REPO}"'/releases/latest";
+      url_done=1;
+      next
+    }
+    $1 == "UPDATED_AT" {
+      print "UPDATED_AT='"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'";
+      updated_done=1;
       next
     }
     { print }
     END {
       if (!tag_done) print "BUILDER_RELEASE_TAG='"${DOWNLOADED_RELEASE_TAG}"'";
       if (!builder_sha_done) print "BUILDER_RELEASE_SHA256='"${DOWNLOADED_ARCHIVE_SHA256}"'";
-      if (!release_sha_done) print "RELEASE_SHA256='"${DOWNLOADED_ARCHIVE_SHA256}"'";
+      if (!url_done) print "BUILDER_RELEASE_URL=https://github.com/'"${REPO}"'/releases/latest";
+      if (!updated_done) print "UPDATED_AT='"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'";
     }
   ' "$ENV_FILE" > "$tmp_file"
   install -m 600 "$tmp_file" "$ENV_FILE"
@@ -1897,9 +2046,11 @@ UPDATE_BODY
 }
 
 write_env_file() {
+  local tmp_env
   backup_file "$ENV_FILE"
   umask 077
-  cat > "$ENV_FILE" <<ENV
+  tmp_env="$(mktemp /tmp/naive.env.XXXXXX)"
+  cat > "$tmp_env" <<ENV
 DOMAIN=${DOMAIN}
 EMAIL=${EMAIL}
 USER=${AUTH_USER}
@@ -1912,11 +2063,19 @@ SERVICE_NAME=${SERVICE_NAME}
 CERT_MODE=${CERT_MODE}
 CERT_FULLCHAIN=${CERT_FULLCHAIN}
 CERT_KEY=${CERT_KEY}
+HTTP3=${HTTP3}
+PROBE_RESISTANCE=${PROBE_RESISTANCE}
 BUILDER_RELEASE_TAG=${DOWNLOADED_RELEASE_TAG}
 BUILDER_RELEASE_SHA256=${DOWNLOADED_ARCHIVE_SHA256}
+BUILDER_RELEASE_URL=${DOWNLOADED_RELEASE_URL:-https://github.com/${REPO}/releases/latest}
 RELEASE_SHA256=${DOWNLOADED_ARCHIVE_SHA256}
 INSTALLED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 ENV
+  if ! mv -f "$tmp_env" "$ENV_FILE"; then
+    rm -f "$tmp_env"
+    log_error "覆盖安装信息失败：$ENV_FILE"
+    return 1
+  fi
   chmod 600 "$ENV_FILE"
   log_ok "安装信息已写入：$ENV_FILE"
 }
@@ -2096,6 +2255,37 @@ purge_all() {
   log_ok "彻底卸载完成。"
 }
 
+caddyfile_has_recommended_site() {
+  [[ -n "$DOMAIN" && -f "$CADDYFILE" ]] || return 1
+  grep -Eq "^[[:space:]]*:443,[[:space:]]*${DOMAIN//./\\.}[[:space:]]*\\{" "$CADDYFILE"
+}
+
+caddyfile_has_domain_only_site() {
+  [[ -n "$DOMAIN" && -f "$CADDYFILE" ]] || return 1
+  grep -Eq "^[[:space:]]*${DOMAIN//./\\.}[[:space:]]*\\{" "$CADDYFILE"
+}
+
+caddyfile_has_route_forward_proxy() {
+  [[ -f "$CADDYFILE" ]] || return 1
+  awk '
+    /^[[:space:]]*route[[:space:]]*\{/ { in_route=1 }
+    in_route && /^[[:space:]]*forward_proxy[[:space:]]*\{/ { found=1 }
+    END { exit found ? 0 : 1 }
+  ' "$CADDYFILE"
+}
+
+print_port_listen_status() {
+  if ! command -v ss >/dev/null 2>&1; then
+    log_warn "未找到 ss，无法显示端口监听状态。"
+    return 0
+  fi
+
+  printf '\n[INFO] TCP 80/443 监听状态：\n'
+  ss -lntp 2>/dev/null | grep -E ':(80|443)\b' || true
+  printf '\n[INFO] UDP 443 监听状态：\n'
+  ss -lnup 2>/dev/null | grep -E ':443\b' || true
+}
+
 show_current_status() {
   load_saved_install_info
 
@@ -2106,12 +2296,52 @@ show_current_status() {
   回落模式：${SITE_MODE:-未设置}
   反代目标：${UPSTREAM:-未设置}
   证书模式：${CERT_MODE:-未设置}
+  HTTP3：${HTTP3:-off}
+  probe_resistance：${PROBE_RESISTANCE:-on}
   证书文件：${CERT_FULLCHAIN:-未设置}
   私钥文件：${CERT_KEY:-未设置}
   Builder 仓库：${REPO}
   Caddy 二进制：${INSTALL_BIN}
   服务名：${SERVICE_NAME}
 STATUS
+
+  if [[ "$HTTP3" == "on" ]]; then
+    log_warn "HTTP/3 需要云安全组和系统防火墙放行 UDP 443；客户端也要明确选择 HTTP3/QUIC。默认推荐仍是 HTTP2 + UDP over TCP。"
+  fi
+
+  if [[ -x "$INSTALL_BIN" ]]; then
+    "$INSTALL_BIN" version || true
+    if "$INSTALL_BIN" list-modules 2>/dev/null | grep -Eiq 'forward_proxy|forwardproxy'; then
+      log_ok "已检测到 forward_proxy 模块。"
+    else
+      log_warn "list-modules 未检测到 forward_proxy 模块。"
+    fi
+  else
+    log_warn "未找到 Caddy 二进制或不可执行：$INSTALL_BIN"
+  fi
+
+  if [[ -f "$CADDYFILE" ]]; then
+    if caddyfile_has_recommended_site; then
+      log_ok "Caddyfile 已使用推荐站点结构：:443, DOMAIN。"
+    else
+      log_warn "当前 Caddyfile 不是推荐 NaiveProxy 结构，可能导致能测延迟但无法使用。建议重新运行安装 / 重新配置。"
+    fi
+    if caddyfile_has_domain_only_site && ! caddyfile_has_recommended_site; then
+      log_warn "检测到 DOMAIN { } 形式站点块；推荐结构应为 :443, DOMAIN { }，且 :443 位于域名前。"
+    fi
+    if caddyfile_has_route_forward_proxy; then
+      log_ok "Caddyfile 包含 route { forward_proxy { 推荐结构。"
+    else
+      log_warn "Caddyfile 未检测到 route { forward_proxy { 推荐结构。"
+    fi
+    if grep -Fq "probe_resistance" "$CADDYFILE"; then
+      log_ok "probe_resistance 已启用。"
+    else
+      log_warn "probe_resistance 未启用。"
+    fi
+  else
+    log_warn "未找到 Caddyfile：$CADDYFILE"
+  fi
 
   if [[ -n "$CERT_FULLCHAIN" ]]; then
     if [[ -s "$CERT_FULLCHAIN" ]]; then
@@ -2132,19 +2362,10 @@ STATUS
     fi
   fi
 
-  if [[ -x "$INSTALL_BIN" ]]; then
-    "$INSTALL_BIN" version || true
-    if "$INSTALL_BIN" list-modules 2>/dev/null | grep -Eiq 'forward_proxy|forwardproxy'; then
-      log_ok "已检测到 forward_proxy 模块。"
-    else
-      log_warn "list-modules 未检测到 forward_proxy 模块。"
-    fi
-  else
-    log_warn "未找到 Caddy 二进制或不可执行：$INSTALL_BIN"
-  fi
-
   if command -v systemctl >/dev/null 2>&1; then
-    systemctl --no-pager --full status "$SERVICE_NAME" || true
+    printf '\n[INFO] systemd 状态：\n'
+    systemctl is-active "$SERVICE_NAME" || true
+    systemctl is-enabled "$SERVICE_NAME" || true
     if systemctl is-enabled --quiet caddy-naive-update.timer 2>/dev/null; then
       log_ok "自动更新 timer 已启用。"
     else
@@ -2152,6 +2373,19 @@ STATUS
     fi
   else
     log_warn "当前环境没有 systemctl。"
+  fi
+
+  print_port_listen_status
+  if command -v ss >/dev/null 2>&1; then
+    if [[ "$HTTP3" == "off" ]]; then
+      if ss -lnup 2>/dev/null | grep -qE ':443\b'; then
+        log_warn "HTTP3=off 但 UDP 443 正在监听，请检查 Caddyfile 或其他进程。"
+      else
+        log_info "HTTP3=off，UDP 443 未监听是正常状态。"
+      fi
+    elif [[ "$HTTP3" == "on" ]] && ! ss -lnup 2>/dev/null | grep -qE ':443\b'; then
+      log_warn "HTTP3=on 但 UDP 443 未监听，请确认 Caddy 配置和防火墙。"
+    fi
   fi
 }
 
@@ -2182,6 +2416,8 @@ print_current_client_config() {
   TLS：tls
   SNI：${DOMAIN}
   跳过证书验证：false
+  HTTP3：${HTTP3}
+  probe_resistance：${PROBE_RESISTANCE}
 
 v2rayN / sing-box 链接：
   ${v2rayn_link}
@@ -2193,9 +2429,9 @@ Shadowrocket / 小火箭链接：
   UDP over TCP 必须开启，否则可能只能测延迟但无法使用。
   QUIC 关闭。
   ALPN 不需要填写。
-  Fingerprint 可以选择 chrome 或留空。
-  Shadowrocket 请选择 HTTP2 类型。
   v2rayN / sing-box GUI 请选择 Naive 类型。
+  Shadowrocket 请选择 HTTP2 类型。
+  HTTP3 只有在你明确开启并放行 UDP 443 时再测试。
 CONFIG
 }
 
@@ -2250,6 +2486,40 @@ apply_auth_change() {
 
   log_ok "认证信息已更新，${SERVICE_NAME} 已重启。"
   print_current_client_config
+}
+
+apply_runtime_config_change() {
+  local description="${1:-配置已更新}"
+  local env_backup=""
+  backup_file "$ENV_FILE"
+  env_backup="$LAST_BACKUP_PATH"
+
+  write_and_validate_caddyfile "$CERT_MODE"
+
+  if ! write_env_file; then
+    log_error "写入 ${ENV_FILE} 失败，正在恢复旧 Caddyfile 和安装信息。"
+    restore_caddyfile_backup || true
+    if [[ -n "$env_backup" && -f "$env_backup" ]]; then
+      cp -a "$env_backup" "$ENV_FILE"
+      chmod 600 "$ENV_FILE" 2>/dev/null || true
+    fi
+    systemctl restart "$SERVICE_NAME" >/dev/null 2>&1 || true
+    die "配置修改失败。"
+  fi
+
+  if ! systemctl restart "$SERVICE_NAME"; then
+    log_error "重启 ${SERVICE_NAME} 失败，正在恢复旧 Caddyfile 和安装信息。"
+    restore_caddyfile_backup || true
+    if [[ -n "$env_backup" && -f "$env_backup" ]]; then
+      cp -a "$env_backup" "$ENV_FILE"
+      chmod 600 "$ENV_FILE" 2>/dev/null || true
+    fi
+    validate_caddyfile || true
+    systemctl restart "$SERVICE_NAME" >/dev/null 2>&1 || true
+    die "配置修改失败，已尝试恢复原服务。"
+  fi
+
+  log_ok "${description}，${SERVICE_NAME} 已重启。"
 }
 
 change_auth_user_interactive() {
@@ -2363,6 +2633,144 @@ MENU
         ;;
     esac
   done
+}
+
+load_runtime_config_context() {
+  require_root
+  load_saved_install_info
+  [[ -f "$ENV_FILE" ]] || die "尚未安装：未找到 ${ENV_FILE}。"
+  [[ -n "$DOMAIN" ]] || die "${ENV_FILE} 中缺少 DOMAIN。"
+  [[ -n "$AUTH_USER" && -n "$AUTH_PASS" ]] || die "${ENV_FILE} 中缺少 USER/PASS。"
+  [[ -x "$INSTALL_BIN" ]] || die "未找到 Caddy 二进制：$INSTALL_BIN。"
+  command -v systemctl >/dev/null 2>&1 || die "当前环境没有 systemctl，无法重启服务。"
+  validate_domain
+  validate_common_args
+  parse_upstream
+}
+
+set_http3_config() {
+  local new_value="$1"
+  load_runtime_config_context
+  [[ "$new_value" == "on" || "$new_value" == "off" ]] || die "HTTP3 必须是 on 或 off。"
+  HTTP3="$new_value"
+  apply_runtime_config_change "HTTP3 已切换为 ${HTTP3}"
+  if [[ "$HTTP3" == "on" ]]; then
+    log_warn "HTTP/3 需要云安全组和系统防火墙放行 UDP 443。默认推荐仍是 HTTP2 + UDP over TCP。"
+  else
+    log_info "HTTP3=off 时 UDP 443 未监听是正常状态。"
+  fi
+  print_port_listen_status
+}
+
+set_probe_resistance_config() {
+  local new_value="$1"
+  load_runtime_config_context
+  [[ "$new_value" == "on" || "$new_value" == "off" ]] || die "probe_resistance 必须是 on 或 off。"
+  PROBE_RESISTANCE="$new_value"
+  apply_runtime_config_change "probe_resistance 已切换为 ${PROBE_RESISTANCE}"
+  if [[ "$PROBE_RESISTANCE" == "off" ]]; then
+    log_warn "probe_resistance 已关闭。此模式仅建议临时诊断使用，排查完成后请执行 --enable-probe-resistance 重新开启。"
+  else
+    log_ok "probe_resistance 已开启。"
+  fi
+}
+
+http3_management_menu() {
+  local choice
+  cat <<'MENU'
+HTTP3 开启 / 关闭
+-------------------------------------------------
+1. 开启 HTTP3
+2. 关闭 HTTP3
+0. 返回
+MENU
+  printf '请选择：'
+  IFS= read -r choice || return 0
+  case "$choice" in
+    1) set_http3_config "on" ;;
+    2) set_http3_config "off" ;;
+    0) return 0 ;;
+    *) log_warn "无效选择。" ;;
+  esac
+}
+
+fix_static_site_permissions_menu() {
+  require_root
+  load_saved_install_info
+  fix_static_site_permissions
+  log_ok "静态站权限已修复。"
+  if [[ -x "$INSTALL_BIN" && -f "$CADDYFILE" ]]; then
+    validate_caddyfile || true
+  fi
+  if command -v systemctl >/dev/null 2>&1 && service_exists; then
+    systemctl restart "$SERVICE_NAME" || die "重启 ${SERVICE_NAME} 失败。"
+    log_ok "服务 ${SERVICE_NAME} 已重启。"
+  fi
+}
+
+proxy_self_test() {
+  load_saved_install_info
+  if [[ ! -f "$ENV_FILE" || -z "$DOMAIN" || -z "$AUTH_USER" || -z "$AUTH_PASS" ]]; then
+    log_warn "尚未安装或 ${ENV_FILE} 中 DOMAIN/USER/PASS 不完整。"
+    return 0
+  fi
+
+  cat <<INFO
+[INFO] 代理核心自检
+  部署域名：${DOMAIN}
+  认证用户：${AUTH_USER}
+  HTTP3：${HTTP3}
+INFO
+
+  if command -v systemctl >/dev/null 2>&1; then
+    if systemctl is-active --quiet "$SERVICE_NAME"; then
+      log_ok "Caddy 服务是 active。"
+    else
+      log_warn "Caddy 服务当前不是 active。"
+    fi
+  fi
+
+  if command -v curl >/dev/null 2>&1; then
+    curl -4I "https://${DOMAIN}" --connect-timeout 5 --max-time 20 || log_warn "HTTPS 探测失败。"
+  else
+    log_warn "未找到 curl，跳过 HTTPS / proxy 自检。"
+    return 0
+  fi
+
+  if [[ -f "$CADDYFILE" ]]; then
+    local caddyfile_ok=1
+    caddyfile_has_recommended_site || caddyfile_ok=0
+    caddyfile_has_route_forward_proxy || caddyfile_ok=0
+    if [[ "$caddyfile_ok" -eq 1 ]]; then
+      log_ok "Caddyfile 使用推荐 NaiveProxy 结构。"
+    else
+      log_warn "当前 Caddyfile 不是推荐 NaiveProxy 结构，可能导致能测延迟但无法使用。建议重新运行安装 / 重新配置。"
+    fi
+    if caddyfile_has_domain_only_site && ! caddyfile_has_recommended_site; then
+      log_warn "检测到 DOMAIN { } 形式站点块；推荐结构应为 :443, DOMAIN { }，且 :443 位于域名前。"
+    fi
+  fi
+
+  if curl --help all 2>/dev/null | grep -q -- '--proxy-http2'; then
+    local encoded_user encoded_pass curl_log
+    encoded_user="$(url_encode "$AUTH_USER")"
+    encoded_pass="$(url_encode "$AUTH_PASS")"
+    curl_log="$(mktemp)"
+    curl -v --proxy-http2 \
+      --resolve "${DOMAIN}:443:127.0.0.1" \
+      --proxy "https://${encoded_user}:${encoded_pass}@${DOMAIN}:443" \
+      "https://cp.cloudflare.com/generate_204" >"$curl_log" 2>&1 || true
+    cat "$curl_log"
+    if grep -Eiq 'HTTP/1\.1 200 Connection established|CONNECT .* 200|record overflow|wrong version number' "$curl_log"; then
+      log_warn "如果出现普通 HTTP/1.1 CONNECT 200 后 TLS record overflow，通常说明测试走的是普通 HTTPS/HTTP1 代理路径，不是最终 NaiveProxy 客户端路径。"
+      log_warn "请重点检查客户端是否选择 Naive/HTTP2 类型，并开启 UDP over TCP。"
+    fi
+    rm -f "$curl_log"
+  else
+    log_warn "当前 curl 不支持 --proxy-http2。普通 curl --proxy 默认可能走 HTTP/1.1 CONNECT，只能验证 TLS/认证/CONNECT，不代表 NaiveProxy 客户端最终可用。"
+    log_warn "如果看到普通 HTTP/1.1 CONNECT 200 后 TLS record overflow，通常说明测试走的是普通 HTTPS/HTTP1 代理路径，不是最终 NaiveProxy 客户端路径。"
+    log_warn "请使用 v2rayN / sing-box Naive 类型或 Shadowrocket HTTP2，且必须开启 UDP over TCP。"
+  fi
 }
 
 unit_exists() {
@@ -2552,7 +2960,7 @@ menu_update_caddy_kernel() {
 toggle_auto_update() {
   require_root
   load_saved_install_info
-  command -v systemctl >/dev/null 2>&1 || die "systemctl is required."
+  command -v systemctl >/dev/null 2>&1 || die "缺少 systemctl，无法管理自动更新。"
 
   if systemctl is-enabled --quiet caddy-naive-update.timer 2>/dev/null || systemctl is-active --quiet caddy-naive-update.timer 2>/dev/null; then
     if prompt_yes_no "自动更新当前已启用，是否关闭？" "N"; then
@@ -2678,6 +3086,8 @@ INFO
   REPO: ${REPO:-未设置}
   INSTALL_BIN: ${INSTALL_BIN:-未设置}
   CERT_MODE: ${CERT_MODE:-未记录}
+  HTTP3: ${HTTP3:-off}
+  PROBE_RESISTANCE: ${PROBE_RESISTANCE:-on}
   CERT_FULLCHAIN: ${CERT_FULLCHAIN:-未记录}
   CERT_KEY: ${CERT_KEY:-未记录}
   BUILDER_RELEASE_TAG: ${builder_tag:-未记录}
@@ -2738,6 +3148,9 @@ Builder：${BUILDER_GITHUB}
 11. SSL / 证书诊断
 12. 重新申请本地证书 acme.sh
 13. 认证信息管理
+14. HTTP3 开启 / 关闭
+15. 代理核心自检
+16. 修复静态站权限
 0. 退出
 MENU
 }
@@ -2750,6 +3163,7 @@ run_management_menu() {
     print_management_menu
     printf '\n请选择：'
     IFS= read -r choice || exit 0
+    choice="${choice//$'\r'/}"
 
     case "$choice" in
       1)
@@ -2791,6 +3205,15 @@ run_management_menu() {
       13)
         run_menu_action auth_management_menu
         ;;
+      14)
+        run_menu_action http3_management_menu
+        ;;
+      15)
+        run_menu_action proxy_self_test
+        ;;
+      16)
+        run_menu_action fix_static_site_permissions_menu
+        ;;
       0)
         exit 0
         ;;
@@ -2803,66 +3226,12 @@ run_management_menu() {
 }
 
 print_success() {
-  cat <<EOF
-
-[OK] 安装完成。
-
-请妥善保存用户名和密码。以下文件仅 root 可读：
-  ${ENV_FILE}
-
-证书模式：
-  ${CERT_MODE}
-EOF
-
+  log_ok "安装完成。"
   print_current_client_config
-
-  if [[ "$CERT_MODE" == "acme-standalone" ]]; then
-    cat <<EOF
-
-本地证书文件：
-  ${CERT_FULLCHAIN}
-  ${CERT_KEY}
-EOF
-  fi
-
-  cat <<EOF
-
-查看状态：
-  systemctl status ${SERVICE_NAME}
-  journalctl -u ${SERVICE_NAME} -e --no-pager
-EOF
-
-  if [[ "$SITE_MODE" == "static" ]]; then
-    cat <<EOF
-
-静态回落站点：
-  网站目录：${SITE_DIR}
-  首页文件：${SITE_DIR}/index.html
-
-自定义静态网页：
-  nano ${SITE_DIR}/index.html
-  chown -R caddy:caddy ${SITE_DIR}
-  find ${SITE_DIR} -type d -exec chmod 755 {} \;
-  find ${SITE_DIR} -type f -exec chmod 644 {} \;
-  systemctl restart ${SERVICE_NAME}
-EOF
-  elif [[ "$SITE_MODE" == "reverse" ]]; then
-    cat <<EOF
-
-反代回落站点：
-  反代目标：${UPSTREAM_BASE}
-  目标主机：${UPSTREAM_HOST}
-
-修改反代目标：
-  重新运行脚本并选择 1. 一键安装 / 重新配置
-  或谨慎编辑 ${CADDYFILE} 后执行：
-  ${INSTALL_BIN} validate --config ${CADDYFILE}
-  systemctl restart ${SERVICE_NAME}
-EOF
-  fi
 }
 
 run_install_flow() {
+  local issue_needed=0
   require_root
   require_supported_os
   require_amd64
@@ -2881,14 +3250,19 @@ run_install_flow() {
 
   if [[ "$CERT_MODE" == "acme-standalone" ]]; then
     if [[ "$NO_START" -eq 1 ]]; then
-      if cert_files_ready; then
+      if cert_exists; then
         write_caddyfile_local_cert
       else
         log_warn "已指定 --no-start，无法执行 acme.sh standalone 申请证书；将暂时写入 Caddy ZeroSSL 自动证书配置。"
         write_caddyfile_auto_zerossl
       fi
     else
-      write_caddyfile_auto_zerossl
+      if should_issue_cert; then
+        issue_needed=1
+        write_caddyfile_auto_zerossl
+      else
+        write_caddyfile_local_cert
+      fi
     fi
   else
     write_and_validate_caddyfile "$CERT_MODE"
@@ -2897,7 +3271,7 @@ run_install_flow() {
   write_systemd_service
   write_update_script
 
-  if [[ "$CERT_MODE" == "acme-standalone" && "$NO_START" -eq 0 ]]; then
+  if [[ "$CERT_MODE" == "acme-standalone" && "$NO_START" -eq 0 && "$issue_needed" -eq 1 ]]; then
     systemctl daemon-reload
     issue_local_cert_workflow
   fi
@@ -2930,7 +3304,7 @@ main() {
     exit 0
   fi
 
-  if [[ "$ACTION_STATUS" -eq 1 || "$ACTION_CHECK_UPDATE" -eq 1 || "$ACTION_UPDATE" -eq 1 || "$ACTION_FORCE_UPDATE" -eq 1 || "$ACTION_SHOW_CLIENT" -eq 1 || "$ACTION_LOGS" -eq 1 || "$ACTION_ISSUE_CERT" -eq 1 || "$ACTION_TLS_DIAGNOSE" -eq 1 || "$ACTION_CHANGE_USER" -eq 1 || "$ACTION_CHANGE_PASS" -eq 1 || -n "$SET_USER_VALUE" || -n "$SET_PASS_VALUE" ]]; then
+  if [[ "$ACTION_STATUS" -eq 1 || "$ACTION_CHECK_UPDATE" -eq 1 || "$ACTION_UPDATE" -eq 1 || "$ACTION_FORCE_UPDATE" -eq 1 || "$ACTION_SHOW_CLIENT" -eq 1 || "$ACTION_LOGS" -eq 1 || "$ACTION_ISSUE_CERT" -eq 1 || "$ACTION_TLS_DIAGNOSE" -eq 1 || "$ACTION_CHANGE_USER" -eq 1 || "$ACTION_CHANGE_PASS" -eq 1 || "$ACTION_PROXY_SELF_TEST" -eq 1 || "$ACTION_FIX_STATIC_PERMS" -eq 1 || ( "$ACTION_HTTP3_TOGGLE" -eq 1 && -z "$DOMAIN" ) || ( "$ACTION_PROBE_TOGGLE" -eq 1 && -z "$DOMAIN" ) || -n "$SET_USER_VALUE" || -n "$SET_PASS_VALUE" ]]; then
     [[ "$ACTION_STATUS" -eq 1 ]] && show_current_status
     [[ "$ACTION_CHECK_UPDATE" -eq 1 ]] && detect_update
     [[ "$ACTION_UPDATE" -eq 1 ]] && update_caddy_kernel 0
@@ -2939,6 +3313,14 @@ main() {
     [[ "$ACTION_TLS_DIAGNOSE" -eq 1 ]] && tls_diagnose
     [[ "$ACTION_CHANGE_USER" -eq 1 ]] && change_auth_user_interactive
     [[ "$ACTION_CHANGE_PASS" -eq 1 ]] && change_auth_pass_interactive
+    [[ "$ACTION_PROXY_SELF_TEST" -eq 1 ]] && proxy_self_test
+    [[ "$ACTION_FIX_STATIC_PERMS" -eq 1 ]] && fix_static_site_permissions_menu
+    if [[ "$ACTION_HTTP3_TOGGLE" -eq 1 && -z "$DOMAIN" ]]; then
+      set_http3_config "$HTTP3"
+    fi
+    if [[ "$ACTION_PROBE_TOGGLE" -eq 1 && -z "$DOMAIN" ]]; then
+      set_probe_resistance_config "$PROBE_RESISTANCE"
+    fi
     if [[ -n "$SET_USER_VALUE" || -n "$SET_PASS_VALUE" ]]; then
       set_auth_credentials_cli
     fi
