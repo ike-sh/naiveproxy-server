@@ -21,11 +21,6 @@ SITE_DIR="/var/www/naive"
 DATA_DIR="/var/lib/caddy"
 BACKUP_DIR="/var/backups/caddy-naive"
 UPDATE_SCRIPT="/usr/local/bin/update-caddy-naive"
-CLIENT_CONFIG="/root/naive-client-config.json"
-NODE_LINK_FILE="/root/naive-node-link.txt"
-SHADOWROCKET_CONFIG="/root/naive-shadowrocket.txt"
-MIHOMO_CONFIG="/root/naive-mihomo.yaml"
-SING_BOX_CONFIG="/root/naive-sing-box.json"
 ENV_FILE="/etc/caddy/naive.env"
 AUTO_UPDATE_SERVICE_FILE="/etc/systemd/system/caddy-naive-update.service"
 AUTO_UPDATE_TIMER_FILE="/etc/systemd/system/caddy-naive-update.timer"
@@ -60,6 +55,10 @@ ACTION_SHOW_CLIENT=0
 ACTION_LOGS=0
 ACTION_ISSUE_CERT=0
 ACTION_TLS_DIAGNOSE=0
+ACTION_CHANGE_USER=0
+ACTION_CHANGE_PASS=0
+SET_USER_VALUE=""
+SET_PASS_VALUE=""
 DO_UNINSTALL=0
 DO_PURGE=0
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
@@ -140,7 +139,11 @@ usage() {
   --force-update               强制重新安装 latest Caddy naive 内核。
   --issue-cert                 使用 acme.sh + ZeroSSL standalone 重新申请本地证书并切换 Caddyfile。
   --tls-diagnose               执行 SSL / 证书诊断。
-  --show-client                显示客户端配置。
+  --show-client                查看当前配置和客户端链接。
+  --change-user                交互式修改认证用户名。
+  --change-pass                交互式修改认证密码。
+  --set-user USER              非交互设置认证用户名。
+  --set-pass PASS              非交互设置认证密码。
   --logs                       查看 caddy 日志。
   --uninstall                  卸载服务和更新脚本，保留配置、站点和数据。
   --purge                      完全卸载服务、更新脚本、二进制、配置、站点和数据。
@@ -151,6 +154,7 @@ usage() {
   bash install-naive-server.sh --domain example.com --email me@example.com --site-mode reverse --upstream https://www.example.org --cert-mode acme-standalone
   bash install-naive-server.sh --issue-cert
   bash install-naive-server.sh --tls-diagnose
+  bash install-naive-server.sh --set-user newuser --set-pass 'newpassword'
 USAGE
 }
 
@@ -191,6 +195,39 @@ build_proxy_url() {
   encoded_user="$(url_encode "$AUTH_USER")"
   encoded_pass="$(url_encode "$AUTH_PASS")"
   printf 'https://%s:%s@%s' "$encoded_user" "$encoded_pass" "$DOMAIN"
+}
+
+base64_no_wrap() {
+  local input="$1"
+  local encoded
+
+  if encoded="$(printf '%s' "$input" | base64 -w 0 2>/dev/null)"; then
+    :
+  else
+    encoded="$(printf '%s' "$input" | base64 | tr -d '\n')"
+  fi
+
+  while [[ "$encoded" == *= ]]; do
+    encoded="${encoded%=}"
+  done
+
+  printf '%s' "$encoded"
+}
+
+generate_v2rayn_link() {
+  local encoded_user encoded_pass encoded_name
+  encoded_user="$(url_encode "$AUTH_USER")"
+  encoded_pass="$(url_encode "$AUTH_PASS")"
+  encoded_name="$(url_encode "naive-${DOMAIN}")"
+  printf 'naive+https://%s:%s@%s:443?security=tls&sni=%s&insecure=0&allowInsecure=0&type=tcp&headerType=none#%s' \
+    "$encoded_user" "$encoded_pass" "$DOMAIN" "$DOMAIN" "$encoded_name"
+}
+
+generate_shadowrocket_link() {
+  local encoded_auth encoded_name
+  encoded_auth="$(base64_no_wrap "${AUTH_USER}:${AUTH_PASS}@${DOMAIN}:443")"
+  encoded_name="$(url_encode "n2")"
+  printf 'http2://%s?peer=%s&uot=1#%s' "$encoded_auth" "$DOMAIN" "$encoded_name"
 }
 
 caddyfile_quote() {
@@ -316,6 +353,22 @@ parse_args() {
         ;;
       --show-client)
         ACTION_SHOW_CLIENT=1
+        ;;
+      --change-user)
+        ACTION_CHANGE_USER=1
+        ;;
+      --change-pass)
+        ACTION_CHANGE_PASS=1
+        ;;
+      --set-user)
+        shift
+        [[ $# -gt 0 ]] || die "--set-user 需要一个值。"
+        SET_USER_VALUE="$1"
+        ;;
+      --set-pass)
+        shift
+        [[ $# -gt 0 ]] || die "--set-pass 需要一个值。"
+        SET_PASS_VALUE="$1"
         ;;
       --logs)
         ACTION_LOGS=1
@@ -812,6 +865,10 @@ load_saved_install_info() {
   [[ -n "$value" ]] && CERT_FULLCHAIN="$value"
   value="$(read_env_value CERT_KEY || true)"
   [[ -n "$value" ]] && CERT_KEY="$value"
+  value="$(read_env_value BUILDER_RELEASE_TAG || true)"
+  [[ -n "$value" ]] && DOWNLOADED_RELEASE_TAG="$value"
+  value="$(read_env_value BUILDER_RELEASE_SHA256 || true)"
+  [[ -n "$value" ]] && DOWNLOADED_ARCHIVE_SHA256="$value"
 
   refresh_paths
   if [[ -n "$DOMAIN" && ( -z "$CERT_FULLCHAIN" || -z "$CERT_KEY" ) ]]; then
@@ -826,6 +883,12 @@ validate_credential_token() {
   if [[ ! "$value" =~ ^[A-Za-z0-9._~:/@+-]+$ ]]; then
     die "${name} 只能包含 A-Z、a-z、0-9、点号、下划线、波浪线、冒号、斜杠、@、加号和连字符。"
   fi
+}
+
+validate_auth_user_safe() {
+  local value="$1"
+  [[ -n "$value" ]] || die "认证用户名不能为空。"
+  [[ "$value" =~ ^[A-Za-z0-9_.-]+$ ]] || die "认证用户名只能包含 A-Z、a-z、0-9、下划线、连字符和点号。"
 }
 
 prepare_credentials() {
@@ -853,7 +916,7 @@ prepare_credentials() {
     fi
   fi
 
-  validate_credential_token "USER" "$AUTH_USER"
+  validate_auth_user_safe "$AUTH_USER"
   validate_credential_token "PASS" "$AUTH_PASS"
 }
 
@@ -1387,7 +1450,6 @@ Type=notify
 User=caddy
 Group=caddy
 ExecStart=${INSTALL_BIN} run --environ --config ${CADDYFILE}
-ExecReload=${INSTALL_BIN} reload --config ${CADDYFILE} --force
 TimeoutStopSec=5s
 LimitNOFILE=1048576
 LimitNPROC=512
@@ -1485,7 +1547,7 @@ install_local_cert() {
   if ! "$ACME_SH" --install-cert -d "$DOMAIN" \
     --key-file "$CERT_KEY" \
     --fullchain-file "$CERT_FULLCHAIN" \
-    --reloadcmd "systemctl reload ${SERVICE_NAME} || systemctl restart ${SERVICE_NAME}"; then
+    --reloadcmd "systemctl restart ${SERVICE_NAME}"; then
     log_error "acme.sh 安装证书失败。"
     log_warn "正在恢复为 Caddy ZeroSSL 自动证书配置，避免服务引用不存在的证书文件。"
     write_caddyfile_auto_zerossl
@@ -1761,12 +1823,7 @@ reload_or_restart_service() {
     return 0
   fi
 
-  if systemctl reload "$SERVICE_NAME"; then
-    log_ok "服务 ${SERVICE_NAME} 已 reload。"
-    return 0
-  fi
-
-  log_warn "reload 失败，正在重启 ${SERVICE_NAME}。"
+  log_info "Caddy admin 已关闭，更新后使用 restart 应用新二进制。"
   if ! systemctl restart "$SERVICE_NAME"; then
     log_error "重启失败。如果状态显示 notify 超时，可将 Type=notify 改为 Type=simple 后重试。"
     systemctl --no-pager --full status "$SERVICE_NAME" || true
@@ -1837,100 +1894,6 @@ UPDATE_BODY
   } > "$UPDATE_SCRIPT"
   chmod 755 "$UPDATE_SCRIPT"
   log_ok "更新脚本已写入：$UPDATE_SCRIPT"
-}
-
-write_client_config() {
-  local proxy_url
-  proxy_url="$(build_proxy_url)"
-  backup_file "$CLIENT_CONFIG"
-  umask 077
-  cat > "$CLIENT_CONFIG" <<JSON
-{
-  "listen": "socks://127.0.0.1:1080",
-  "proxy": "${proxy_url}"
-}
-JSON
-  chmod 600 "$CLIENT_CONFIG"
-  log_ok "客户端 JSON 配置已写入：$CLIENT_CONFIG"
-}
-
-write_node_link_file() {
-  local proxy_url
-  proxy_url="$(build_proxy_url)"
-  backup_file "$NODE_LINK_FILE"
-  umask 077
-  printf '%s\n' "$proxy_url" > "$NODE_LINK_FILE"
-  chmod 600 "$NODE_LINK_FILE"
-  log_ok "节点链接文件已写入：$NODE_LINK_FILE"
-}
-
-write_shadowrocket_config() {
-  local proxy_url
-  proxy_url="$(build_proxy_url)"
-  backup_file "$SHADOWROCKET_CONFIG"
-  umask 077
-  printf '%s#%s\n' "$proxy_url" "$DOMAIN" > "$SHADOWROCKET_CONFIG"
-  chmod 600 "$SHADOWROCKET_CONFIG"
-  log_ok "Shadowrocket 配置已写入：$SHADOWROCKET_CONFIG"
-}
-
-write_mihomo_config() {
-  local username_yaml password_yaml name_yaml
-  username_yaml="$(yaml_double_quote "$AUTH_USER")"
-  password_yaml="$(yaml_double_quote "$AUTH_PASS")"
-  name_yaml="$(yaml_double_quote "naive-${DOMAIN}")"
-  backup_file "$MIHOMO_CONFIG"
-  umask 077
-  cat > "$MIHOMO_CONFIG" <<YAML
-proxies:
-  - name: ${name_yaml}
-    type: http
-    server: ${DOMAIN}
-    port: 443
-    username: ${username_yaml}
-    password: ${password_yaml}
-    tls: true
-    skip-cert-verify: false
-YAML
-  chmod 600 "$MIHOMO_CONFIG"
-  log_ok "Mihomo 配置已写入：$MIHOMO_CONFIG"
-}
-
-write_sing_box_config() {
-  local domain_json user_json pass_json
-  domain_json="$(json_escape "$DOMAIN")"
-  user_json="$(json_escape "$AUTH_USER")"
-  pass_json="$(json_escape "$AUTH_PASS")"
-  backup_file "$SING_BOX_CONFIG"
-  umask 077
-  cat > "$SING_BOX_CONFIG" <<JSON
-{
-  "outbounds": [
-    {
-      "type": "http",
-      "tag": "naive",
-      "server": "${domain_json}",
-      "server_port": 443,
-      "username": "${user_json}",
-      "password": "${pass_json}",
-      "tls": {
-        "enabled": true,
-        "server_name": "${domain_json}"
-      }
-    }
-  ]
-}
-JSON
-  chmod 600 "$SING_BOX_CONFIG"
-  log_ok "sing-box 配置已写入：$SING_BOX_CONFIG"
-}
-
-write_client_outputs() {
-  write_client_config
-  write_node_link_file
-  write_shadowrocket_config
-  write_mihomo_config
-  write_sing_box_config
 }
 
 write_env_file() {
@@ -2061,7 +2024,7 @@ stop_disable_unit_if_present() {
   local unit="$1"
   if systemctl list-unit-files "$unit" --no-legend 2>/dev/null | grep -q . || systemctl status "$unit" >/dev/null 2>&1; then
     systemctl disable --now "$unit" >/dev/null 2>&1 || true
-    log_ok "Stopped and disabled $unit if it was active."
+    log_ok "已停止并禁用 $unit（如果它处于活动状态）。"
   fi
 }
 
@@ -2127,12 +2090,6 @@ purge_all() {
   if [[ "$INSTALL_BIN" != "/usr/local/bin/caddy" ]]; then
     remove_file_with_backup "/usr/local/bin/caddy"
   fi
-  remove_file_with_backup "$CLIENT_CONFIG"
-  remove_file_with_backup "$NODE_LINK_FILE"
-  remove_file_with_backup "$SHADOWROCKET_CONFIG"
-  remove_file_with_backup "$MIHOMO_CONFIG"
-  remove_file_with_backup "$SING_BOX_CONFIG"
-
   rm -rf "$CONFIG_DIR" "$SITE_DIR" "$DATA_DIR"
   rm -rf "$BACKUP_DIR"
   systemctl daemon-reload
@@ -2198,87 +2155,214 @@ STATUS
   fi
 }
 
-show_client_config() {
-  local found=0
-  local proxy_url=""
+print_current_client_config() {
+  local v2rayn_link shadowrocket_link
   load_saved_install_info
 
-  if [[ -n "$DOMAIN" && -n "$AUTH_USER" && -n "$AUTH_PASS" ]]; then
-    proxy_url="$(build_proxy_url)"
-    found=1
-    cat <<URL
-[INFO] NaiveProxy 节点链接：
-  ${proxy_url}
-URL
+  if [[ ! -f "$ENV_FILE" ]]; then
+    log_warn "尚未安装：未找到 ${ENV_FILE}。"
+    return 0
   fi
 
-  if [[ -f "$NODE_LINK_FILE" ]]; then
-    found=1
-    if [[ -r "$NODE_LINK_FILE" ]]; then
-      cat <<CONFIG
-[INFO] 节点链接文件：${NODE_LINK_FILE}
+  if [[ -z "$DOMAIN" || -z "$AUTH_USER" || -z "$AUTH_PASS" ]]; then
+    log_warn "${ENV_FILE} 中 DOMAIN/USER/PASS 不完整，无法生成客户端链接。"
+    return 0
+  fi
+
+  v2rayn_link="$(generate_v2rayn_link)"
+  shadowrocket_link="$(generate_shadowrocket_link)"
+
+  cat <<CONFIG
+当前服务端配置：
+  地址：${DOMAIN}
+  端口：443
+  用户名：${AUTH_USER}
+  密码：${AUTH_PASS}
+  UDP over TCP：On（必须开启）
+  TLS：tls
+  SNI：${DOMAIN}
+  跳过证书验证：false
+
+v2rayN / sing-box 链接：
+  ${v2rayn_link}
+
+Shadowrocket / 小火箭链接：
+  ${shadowrocket_link}
+
+重要提示：
+  UDP over TCP 必须开启，否则可能只能测延迟但无法使用。
+  QUIC 关闭。
+  ALPN 不需要填写。
+  Fingerprint 可以选择 chrome 或留空。
+  Shadowrocket 请选择 HTTP2 类型。
+  v2rayN / sing-box GUI 请选择 Naive 类型。
 CONFIG
-      cat "$NODE_LINK_FILE"
-      printf '\n'
-    else
-      printf '[WARN] 节点链接文件存在但不可读：%s\n' "$NODE_LINK_FILE"
+}
+
+show_client_config() {
+  print_current_client_config
+}
+
+load_auth_change_context() {
+  require_root
+  load_saved_install_info
+  [[ -f "$ENV_FILE" ]] || die "尚未安装：未找到 ${ENV_FILE}。"
+  [[ -n "$DOMAIN" ]] || die "${ENV_FILE} 中缺少 DOMAIN。"
+  [[ -n "$AUTH_USER" ]] || die "${ENV_FILE} 中缺少 USER。"
+  [[ -n "$AUTH_PASS" ]] || die "${ENV_FILE} 中缺少 PASS。"
+  [[ -x "$INSTALL_BIN" ]] || die "未找到 Caddy 二进制：$INSTALL_BIN。"
+  command -v systemctl >/dev/null 2>&1 || die "当前环境没有 systemctl，无法重启服务。"
+  validate_domain
+  validate_common_args
+  parse_upstream
+}
+
+apply_auth_change() {
+  local env_backup=""
+  backup_file "$ENV_FILE"
+  env_backup="$LAST_BACKUP_PATH"
+
+  write_and_validate_caddyfile "$CERT_MODE"
+
+  if ! write_env_file; then
+    log_error "写入 ${ENV_FILE} 失败，正在恢复旧 Caddyfile 和安装信息。"
+    restore_caddyfile_backup || true
+    if [[ -n "$env_backup" && -f "$env_backup" ]]; then
+      cp -a "$env_backup" "$ENV_FILE"
+      chmod 600 "$ENV_FILE" 2>/dev/null || true
     fi
+    systemctl restart "$SERVICE_NAME" >/dev/null 2>&1 || true
+    die "认证信息修改失败。"
   fi
 
-  if [[ -f "$CLIENT_CONFIG" ]]; then
-    found=1
-    if [[ -r "$CLIENT_CONFIG" ]]; then
-      cat <<CONFIG
-[INFO] 客户端 JSON 配置：${CLIENT_CONFIG}
-CONFIG
-      cat "$CLIENT_CONFIG"
-      printf '\n'
-    else
-      printf '[WARN] 客户端配置存在但不可读：%s\n' "$CLIENT_CONFIG"
+  if ! systemctl restart "$SERVICE_NAME"; then
+    log_error "重启 ${SERVICE_NAME} 失败，正在恢复旧 Caddyfile 和安装信息。"
+    restore_caddyfile_backup || true
+    if [[ -n "$env_backup" && -f "$env_backup" ]]; then
+      cp -a "$env_backup" "$ENV_FILE"
+      chmod 600 "$ENV_FILE" 2>/dev/null || true
     fi
+    validate_caddyfile || true
+    systemctl restart "$SERVICE_NAME" >/dev/null 2>&1 || true
+    [[ -n "$env_backup" ]] && log_warn "安装信息已从备份恢复：$env_backup"
+    die "认证信息修改失败，已尝试恢复原服务。"
   fi
 
-  if [[ -f "$SHADOWROCKET_CONFIG" ]]; then
-    found=1
-    if [[ -r "$SHADOWROCKET_CONFIG" ]]; then
-      printf '[INFO] Shadowrocket 配置：%s\n' "$SHADOWROCKET_CONFIG"
-      cat "$SHADOWROCKET_CONFIG"
-      printf '\n'
-    else
-      printf '[WARN] Shadowrocket 配置存在但不可读：%s\n' "$SHADOWROCKET_CONFIG"
+  log_ok "认证信息已更新，${SERVICE_NAME} 已重启。"
+  print_current_client_config
+}
+
+change_auth_user_interactive() {
+  local new_user
+  load_auth_change_context
+  printf '当前用户名：%s\n' "$AUTH_USER"
+  while true; do
+    printf '请输入新用户名：'
+    IFS= read -r new_user || die "输入已取消。"
+    if [[ -z "$new_user" ]]; then
+      log_warn "用户名不能为空。"
+      continue
     fi
-  fi
-
-  if [[ -f "$MIHOMO_CONFIG" ]]; then
-    found=1
-    if [[ -r "$MIHOMO_CONFIG" ]]; then
-      printf '[INFO] Mihomo 配置：%s\n' "$MIHOMO_CONFIG"
-      cat "$MIHOMO_CONFIG"
-      printf '\n'
-    else
-      printf '[WARN] Mihomo 配置存在但不可读：%s\n' "$MIHOMO_CONFIG"
+    if [[ ! "$new_user" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+      log_warn "用户名只能包含 A-Z、a-z、0-9、下划线、连字符和点号。"
+      continue
     fi
-  fi
+    break
+  done
 
-  if [[ -f "$SING_BOX_CONFIG" ]]; then
-    found=1
-    if [[ -r "$SING_BOX_CONFIG" ]]; then
-      printf '[INFO] sing-box 配置：%s\n' "$SING_BOX_CONFIG"
-      cat "$SING_BOX_CONFIG"
-      printf '\n'
-    else
-      printf '[WARN] sing-box 配置存在但不可读：%s\n' "$SING_BOX_CONFIG"
-    fi
-  fi
+  AUTH_USER="$new_user"
+  apply_auth_change
+}
 
-  if [[ -f "$ENV_FILE" && -z "$proxy_url" ]]; then
-    found=1
-    printf '[WARN] %s 存在，但 DOMAIN/USER/PASS 不完整或不可读。\n' "$ENV_FILE"
-  fi
+change_auth_pass_interactive() {
+  local choice first second
+  load_auth_change_context
 
-  if [[ "$found" -eq 0 ]]; then
-    printf '[WARN] 尚未安装或未找到客户端配置。\n'
+  while true; do
+    printf '请选择修改密码方式：\n'
+    printf '  1) 自动生成强随机密码\n'
+    printf '  2) 手动输入新密码\n'
+    printf '请选择 [1/2]: '
+    IFS= read -r choice || die "输入已取消。"
+    case "$choice" in
+      1)
+        AUTH_PASS="$(openssl rand -hex 24)"
+        log_info "已生成新的强随机密码。"
+        break
+        ;;
+      2)
+        while true; do
+          printf '请输入新密码：'
+          IFS= read -r -s first || die "输入已取消。"
+          printf '\n'
+          [[ -n "$first" ]] || { log_warn "密码不能为空。"; continue; }
+          printf '请再次输入新密码：'
+          IFS= read -r -s second || die "输入已取消。"
+          printf '\n'
+          if [[ "$first" != "$second" ]]; then
+            log_warn "两次输入的密码不一致，请重新输入。"
+            continue
+          fi
+          AUTH_PASS="$first"
+          validate_credential_token "PASS" "$AUTH_PASS"
+          break
+        done
+        break
+        ;;
+      *)
+        log_warn "请选择 1 或 2。"
+        ;;
+    esac
+  done
+
+  validate_credential_token "PASS" "$AUTH_PASS"
+  apply_auth_change
+}
+
+set_auth_credentials_cli() {
+  load_auth_change_context
+  if [[ -n "$SET_USER_VALUE" ]]; then
+    validate_auth_user_safe "$SET_USER_VALUE"
+    AUTH_USER="$SET_USER_VALUE"
   fi
+  if [[ -n "$SET_PASS_VALUE" ]]; then
+    AUTH_PASS="$SET_PASS_VALUE"
+    validate_credential_token "PASS" "$AUTH_PASS"
+  fi
+  [[ -n "$SET_USER_VALUE" || -n "$SET_PASS_VALUE" ]] || die "未提供 --set-user 或 --set-pass。"
+  apply_auth_change
+}
+
+auth_management_menu() {
+  local choice
+
+  while true; do
+    cat <<'MENU'
+认证信息管理
+-------------------------------------------------
+1. 修改用户名
+2. 修改密码
+0. 返回
+MENU
+    printf '请选择：'
+    IFS= read -r choice || return 0
+    case "$choice" in
+      1)
+        change_auth_user_interactive
+        return 0
+        ;;
+      2)
+        change_auth_pass_interactive
+        return 0
+        ;;
+      0)
+        return 0
+        ;;
+      *)
+        log_warn "无效选择。"
+        ;;
+    esac
+  done
 }
 
 unit_exists() {
@@ -2561,11 +2645,6 @@ show_fallback_info() {
   Caddyfile: ${CADDYFILE}
   静态网页目录: ${SITE_DIR}
   静态首页文件: ${SITE_DIR}/index.html
-  客户端 JSON 配置: ${CLIENT_CONFIG}
-  节点链接: ${NODE_LINK_FILE}
-  Shadowrocket: ${SHADOWROCKET_CONFIG}
-  Mihomo: ${MIHOMO_CONFIG}
-  sing-box: ${SING_BOX_CONFIG}
   安装信息: ${ENV_FILE}
   更新脚本: ${UPDATE_SCRIPT}
   证书 fullchain: ${CERT_FULLCHAIN:-${CERT_BASE_DIR}/DOMAIN/fullchain.pem}
@@ -2585,7 +2664,7 @@ INFO
   find ${SITE_DIR} -type d -exec chmod 755 {} \;
   find ${SITE_DIR} -type f -exec chmod 644 {} \;
   ${INSTALL_BIN} validate --config ${CADDYFILE}
-  systemctl reload ${SERVICE_NAME}
+  systemctl restart ${SERVICE_NAME}
 INFO
 
   if [[ -f "$ENV_FILE" ]]; then
@@ -2622,7 +2701,7 @@ INFO
   find ${SITE_DIR} -type d -exec chmod 755 {} \;
   find ${SITE_DIR} -type f -exec chmod 644 {} \;
   ${INSTALL_BIN} validate --config ${CADDYFILE}
-  systemctl reload ${SERVICE_NAME}
+  systemctl restart ${SERVICE_NAME}
 INFO
       ;;
     reverse)
@@ -2653,11 +2732,12 @@ Builder：${BUILDER_GITHUB}
 5. 自动更新管理
 6. 卸载服务，保留配置
 7. 完全卸载所有文件
-8. 显示客户端配置
+8. 查看当前配置 / 客户端链接
 9. 查看运行日志
 10. 回落网站说明 / 配置位置
 11. SSL / 证书诊断
 12. 重新申请本地证书 acme.sh
+13. 认证信息管理
 0. 退出
 MENU
 }
@@ -2708,6 +2788,9 @@ run_management_menu() {
       12)
         run_menu_action issue_cert_from_saved_config
         ;;
+      13)
+        run_menu_action auth_management_menu
+        ;;
       0)
         exit 0
         ;;
@@ -2720,51 +2803,18 @@ run_management_menu() {
 }
 
 print_success() {
-  local proxy_url
-  proxy_url="$(build_proxy_url)"
   cat <<EOF
 
 [OK] 安装完成。
 
-NaiveProxy 节点链接：
-  ${proxy_url}
-
-节点链接文件：
-  ${NODE_LINK_FILE}
-
-客户端 JSON 配置：
-  ${CLIENT_CONFIG}
-
-Shadowrocket 配置：
-  ${SHADOWROCKET_CONFIG}
-
-Mihomo 配置：
-  ${MIHOMO_CONFIG}
-
-sing-box 配置：
-  ${SING_BOX_CONFIG}
-
-配置内容：
-{
-  "listen": "socks://127.0.0.1:1080",
-  "proxy": "${proxy_url}"
-}
-
-说明：
-  NaiveProxy 没有像 VLESS 一样统一的 vless:// 分享标准。
-  这里输出的是 NaiveProxy HTTPS 代理地址，适用于 naive-client-config.json 的 proxy 字段，也方便复制保存。
-
 请妥善保存用户名和密码。以下文件仅 root 可读：
   ${ENV_FILE}
-  ${CLIENT_CONFIG}
-  ${NODE_LINK_FILE}
-  ${SHADOWROCKET_CONFIG}
-  ${MIHOMO_CONFIG}
-  ${SING_BOX_CONFIG}
 
 证书模式：
   ${CERT_MODE}
 EOF
+
+  print_current_client_config
 
   if [[ "$CERT_MODE" == "acme-standalone" ]]; then
     cat <<EOF
@@ -2794,7 +2844,7 @@ EOF
   chown -R caddy:caddy ${SITE_DIR}
   find ${SITE_DIR} -type d -exec chmod 755 {} \;
   find ${SITE_DIR} -type f -exec chmod 644 {} \;
-  systemctl reload ${SERVICE_NAME}
+  systemctl restart ${SERVICE_NAME}
 EOF
   elif [[ "$SITE_MODE" == "reverse" ]]; then
     cat <<EOF
@@ -2807,7 +2857,7 @@ EOF
   重新运行脚本并选择 1. 一键安装 / 重新配置
   或谨慎编辑 ${CADDYFILE} 后执行：
   ${INSTALL_BIN} validate --config ${CADDYFILE}
-  systemctl reload ${SERVICE_NAME}
+  systemctl restart ${SERVICE_NAME}
 EOF
   fi
 }
@@ -2853,7 +2903,6 @@ run_install_flow() {
   fi
 
   write_env_file
-  write_client_outputs
 
   if [[ "$AUTO_UPDATE" -eq 1 ]]; then
     write_auto_update_units
@@ -2881,13 +2930,18 @@ main() {
     exit 0
   fi
 
-  if [[ "$ACTION_STATUS" -eq 1 || "$ACTION_CHECK_UPDATE" -eq 1 || "$ACTION_UPDATE" -eq 1 || "$ACTION_FORCE_UPDATE" -eq 1 || "$ACTION_SHOW_CLIENT" -eq 1 || "$ACTION_LOGS" -eq 1 || "$ACTION_ISSUE_CERT" -eq 1 || "$ACTION_TLS_DIAGNOSE" -eq 1 ]]; then
+  if [[ "$ACTION_STATUS" -eq 1 || "$ACTION_CHECK_UPDATE" -eq 1 || "$ACTION_UPDATE" -eq 1 || "$ACTION_FORCE_UPDATE" -eq 1 || "$ACTION_SHOW_CLIENT" -eq 1 || "$ACTION_LOGS" -eq 1 || "$ACTION_ISSUE_CERT" -eq 1 || "$ACTION_TLS_DIAGNOSE" -eq 1 || "$ACTION_CHANGE_USER" -eq 1 || "$ACTION_CHANGE_PASS" -eq 1 || -n "$SET_USER_VALUE" || -n "$SET_PASS_VALUE" ]]; then
     [[ "$ACTION_STATUS" -eq 1 ]] && show_current_status
     [[ "$ACTION_CHECK_UPDATE" -eq 1 ]] && detect_update
     [[ "$ACTION_UPDATE" -eq 1 ]] && update_caddy_kernel 0
     [[ "$ACTION_FORCE_UPDATE" -eq 1 ]] && update_caddy_kernel 1
     [[ "$ACTION_ISSUE_CERT" -eq 1 ]] && issue_cert_from_saved_config
     [[ "$ACTION_TLS_DIAGNOSE" -eq 1 ]] && tls_diagnose
+    [[ "$ACTION_CHANGE_USER" -eq 1 ]] && change_auth_user_interactive
+    [[ "$ACTION_CHANGE_PASS" -eq 1 ]] && change_auth_pass_interactive
+    if [[ -n "$SET_USER_VALUE" || -n "$SET_PASS_VALUE" ]]; then
+      set_auth_credentials_cli
+    fi
     [[ "$ACTION_SHOW_CLIENT" -eq 1 ]] && show_client_config
     [[ "$ACTION_LOGS" -eq 1 ]] && show_caddy_logs
     exit 0
