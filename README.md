@@ -33,6 +33,18 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ike-sh/naiveproxy-server/mai
 
 `--interactive` / `-i` 现在也是进入主菜单。只有在主菜单选择 `1. 一键安装 / 重新配置` 后，才会进入安装配置向导。
 
+如果系统没有 `curl`：
+
+```bash
+apt update && apt install -y curl
+```
+
+也可以使用 `wget`：
+
+```bash
+bash <(wget -qO- https://raw.githubusercontent.com/ike-sh/naiveproxy-server/main/install-naive-server.sh)
+```
+
 主菜单内容：
 
 ```text
@@ -47,8 +59,11 @@ NaiveProxy Server 管理菜单
 7. 完全卸载所有文件
 8. 显示客户端配置
 9. 查看运行日志
+10. 回落网站说明 / 配置位置
 0. 退出
 ```
+
+菜单项执行失败会显示错误并返回菜单，不会直接退出到 shell。只有选择 `0. 退出` 或按 `Ctrl+C` 才会离开主菜单。
 
 ## 无人值守安装
 
@@ -64,8 +79,37 @@ bash install-naive-server.sh --domain example.com --email me@example.com --site-
 bash install-naive-server.sh --domain example.com --email me@example.com --site-mode reverse --upstream https://www.example.org
 ```
 
-`static`：生成本地静态 HTML 回落站，最稳定。  
-`reverse`：反代其他正常网站，更像真实站点，但可能受 CSP、Cookie、登录、跳转和合规影响。
+## 回落站点模式
+
+`static`：本地静态网页回落，最稳定，推荐。
+
+- 站点目录：`/var/www/naive`
+- 首页文件：`/var/www/naive/index.html`
+- 适合放一个普通首页、产品页或个人页
+
+修改后执行：
+
+```bash
+systemctl reload caddy
+```
+
+`reverse`：反代一个正常网站作为回落站。
+
+- 输入 upstream，例如：`https://www.example.org`
+- 脚本会生成 `reverse_proxy` 配置
+- 第三方站可能有 CSP、Cookie、跳转、Host 校验和合规问题
+- 建议只反代自己有权使用的网站或普通公开静态站
+
+菜单 `10. 回落网站说明 / 配置位置` 会显示：
+
+- `Caddyfile: /etc/caddy/Caddyfile`
+- `Static web root: /var/www/naive`
+- `Static index: /var/www/naive/index.html`
+- `Client config: /root/naive-client-config.json`
+- `Install env: /etc/caddy/naive.env`
+- `Updater: /usr/local/bin/update-caddy-naive`
+
+如果已经安装，还会显示 `DOMAIN`、`SITE_MODE`、`UPSTREAM`、`REPO`、`INSTALL_BIN`、`BUILDER_RELEASE_TAG` 和 `BUILDER_RELEASE_SHA256`。
 
 ## 常用命令
 

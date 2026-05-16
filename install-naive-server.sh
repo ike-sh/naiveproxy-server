@@ -323,9 +323,15 @@ prompt_site_mode() {
 
   while true; do
     default_label="$SITE_MODE"
-    printf '回落网站模式 SITE_MODE [%s]\n' "$default_label"
-    printf '  1) static，本地静态页面，推荐\n'
-    printf '  2) reverse，反代其他网站\n'
+    printf '回落网站模式 SITE_MODE：\n'
+    printf '  1) static  - 本地静态网页，最稳定，推荐\n'
+    printf '              网站目录：%s\n' "$SITE_DIR"
+    printf '              首页文件：%s/index.html\n' "$SITE_DIR"
+    printf '              适合放一个普通首页 / 产品页 / 个人页\n'
+    printf '  2) reverse - 反代一个正常网站作为回落站\n'
+    printf '              示例：https://www.example.org\n'
+    printf '              注意：第三方网站可能受 CSP、Cookie、跳转、Host 校验和合规影响\n'
+    printf '              建议只反代自己有权使用的网站或普通公开静态站\n'
     printf '请选择 [1/2/static/reverse，回车默认 %s]: ' "$default_label"
     IFS= read -r input || die "Input cancelled."
 
@@ -425,7 +431,7 @@ confirm_interactive_install() {
       return 0
       ;;
     *)
-      log_warn "Installation cancelled."
+      printf '[WARN] Installation cancelled.\n'
       exit 0
       ;;
   esac
@@ -1674,6 +1680,8 @@ purge_all() {
   [[ "$answer" == "DELETE" ]] || die "Cancelled."
 
   stop_disable_unit_if_present "${SERVICE_NAME}.service"
+  stop_disable_unit_if_present "caddy.service"
+  stop_disable_unit_if_present "caddy-naive-update.service"
   stop_disable_unit_if_present "caddy-naive-update.timer"
 
   mkdir -p "$BACKUP_DIR"
@@ -1685,6 +1693,9 @@ purge_all() {
   fi
 
   remove_file_with_backup "$SERVICE_FILE"
+  if [[ "$SERVICE_FILE" != "/etc/systemd/system/caddy.service" ]]; then
+    remove_file_with_backup "/etc/systemd/system/caddy.service"
+  fi
   remove_file_with_backup "$AUTO_UPDATE_SERVICE_FILE"
   remove_file_with_backup "$AUTO_UPDATE_TIMER_FILE"
   remove_file_with_backup "$UPDATE_SCRIPT"
@@ -1779,14 +1790,14 @@ unit_exists() {
 
 show_caddy_logs() {
   if ! command -v systemctl >/dev/null 2>&1 || ! command -v journalctl >/dev/null 2>&1; then
-    log_warn "systemctl/journalctl is not available."
+    printf '[WARN] journalctl 或 systemctl 不存在，无法查看日志。\n'
     return 0
   fi
 
   if unit_exists "caddy.service"; then
     journalctl -u caddy -e --no-pager
   else
-    log_warn "尚未安装：未找到 caddy.service。"
+    printf '[WARN] caddy.service 不存在，可能尚未安装。\n'
   fi
 }
 
@@ -1855,6 +1866,18 @@ update_caddy_kernel() {
   "$UPDATE_SCRIPT"
 }
 
+menu_update_caddy_kernel() {
+  load_saved_install_info
+  if [[ ! -f "$ENV_FILE" || ! -x "$INSTALL_BIN" || ! -x "$UPDATE_SCRIPT" ]]; then
+    printf '[WARN] 当前尚未安装或更新脚本不存在。\n'
+    printf '[INFO] 请先选择 1. 一键安装 / 重新配置。\n'
+    printf '[INFO] 如果只是想查看 GitHub 最新版本，请选择 3. 检测更新。\n'
+    return 0
+  fi
+
+  update_caddy_kernel 0
+}
+
 toggle_auto_update() {
   require_root
   load_saved_install_info
@@ -1879,10 +1902,125 @@ toggle_auto_update() {
   fi
 }
 
+menu_manage_auto_update() {
+  load_saved_install_info
+  if [[ ! -f "$ENV_FILE" || ! -x "$UPDATE_SCRIPT" || ! -f "$SERVICE_FILE" ]]; then
+    printf '[WARN] 当前尚未安装完整 NaiveProxy Server。\n'
+    printf '[INFO] 请先选择 1. 一键安装 / 重新配置。\n'
+    return 0
+  fi
+
+  if ! command -v systemctl >/dev/null 2>&1; then
+    log_warn "systemctl 不存在，无法管理自动更新。"
+    return 0
+  fi
+
+  toggle_auto_update
+}
+
 pause_for_menu() {
   local _
   printf '\n按 Enter 返回菜单...'
   IFS= read -r _ || true
+}
+
+run_menu_action() {
+  local action="$1"
+  shift || true
+
+  set +e
+  (
+    set -e
+    "$action" "$@"
+  )
+  local rc=$?
+  set -e
+
+  if [[ "$rc" -ne 0 ]]; then
+    log_warn "操作未完成，退出码：$rc"
+  fi
+
+  pause_for_menu
+}
+
+menu_install_or_reconfigure() {
+  require_root
+  load_saved_install_info
+  INTERACTIVE=1
+  run_interactive_wizard
+  run_install_flow
+}
+
+menu_uninstall_service() {
+  require_root
+  load_saved_install_info
+  uninstall_service
+}
+
+menu_purge_all() {
+  require_root
+  load_saved_install_info
+  purge_all
+}
+
+show_fallback_info() {
+  local builder_tag builder_sha installed=0
+  load_saved_install_info
+  builder_tag="$(read_env_value BUILDER_RELEASE_TAG || true)"
+  builder_sha="$(read_env_value BUILDER_RELEASE_SHA256 || true)"
+
+  cat <<INFO
+[INFO] 配置位置
+  Caddyfile: ${CADDYFILE}
+  Static web root: ${SITE_DIR}
+  Static index: ${SITE_DIR}/index.html
+  Client config: ${CLIENT_CONFIG}
+  Install env: ${ENV_FILE}
+  Updater: ${UPDATE_SCRIPT}
+INFO
+
+  if [[ -f "$ENV_FILE" ]]; then
+    installed=1
+    cat <<INFO
+
+[INFO] 当前安装信息
+  DOMAIN: ${DOMAIN:-not set}
+  SITE_MODE: ${SITE_MODE:-not set}
+  UPSTREAM: ${UPSTREAM:-not set}
+  REPO: ${REPO:-not set}
+  INSTALL_BIN: ${INSTALL_BIN:-not set}
+  BUILDER_RELEASE_TAG: ${builder_tag:-not recorded}
+  BUILDER_RELEASE_SHA256: ${builder_sha:-not recorded}
+INFO
+  fi
+
+  if [[ "$installed" -eq 0 ]]; then
+    printf '[WARN] 当前未检测到安装信息。你可以先选择 1 安装。\n'
+    return 0
+  fi
+
+  case "$SITE_MODE" in
+    static)
+      cat <<INFO
+
+[INFO] 当前使用本地静态网页回落。你可以修改：
+  ${SITE_DIR}/index.html
+修改后执行：
+  systemctl reload ${SERVICE_NAME}
+INFO
+      ;;
+    reverse)
+      cat <<INFO
+
+[INFO] 当前使用反代回落。
+  Upstream: ${UPSTREAM:-not set}
+如需修改，建议重新运行菜单 1 重新配置。
+INFO
+      ;;
+    *)
+      log_warn "未知回落模式：${SITE_MODE:-not set}"
+      ;;
+  esac
 }
 
 print_management_menu() {
@@ -1901,6 +2039,7 @@ Builder：${BUILDER_GITHUB}
 7. 完全卸载所有文件
 8. 显示客户端配置
 9. 查看运行日志
+10. 回落网站说明 / 配置位置
 0. 退出
 MENU
 }
@@ -1916,48 +2055,34 @@ run_management_menu() {
 
     case "$choice" in
       1)
-        require_root
-        load_saved_install_info
-        INTERACTIVE=1
-        run_interactive_wizard
-        run_install_flow
-        pause_for_menu
+        run_menu_action menu_install_or_reconfigure
         ;;
       2)
-        show_current_status
-        pause_for_menu
+        run_menu_action show_current_status
         ;;
       3)
-        detect_update
-        pause_for_menu
+        run_menu_action detect_update
         ;;
       4)
-        update_caddy_kernel
-        pause_for_menu
+        run_menu_action menu_update_caddy_kernel
         ;;
       5)
-        toggle_auto_update
-        pause_for_menu
+        run_menu_action menu_manage_auto_update
         ;;
       6)
-        require_root
-        load_saved_install_info
-        uninstall_service
-        pause_for_menu
+        run_menu_action menu_uninstall_service
         ;;
       7)
-        require_root
-        load_saved_install_info
-        purge_all
-        pause_for_menu
+        run_menu_action menu_purge_all
         ;;
       8)
-        show_client_config
-        pause_for_menu
+        run_menu_action show_client_config
         ;;
       9)
-        show_caddy_logs
-        pause_for_menu
+        run_menu_action show_caddy_logs
+        ;;
+      10)
+        run_menu_action show_fallback_info
         ;;
       0)
         exit 0
@@ -1993,6 +2118,32 @@ Check status:
   systemctl status ${SERVICE_NAME}
   journalctl -u ${SERVICE_NAME} -e --no-pager
 EOF
+
+  if [[ "$SITE_MODE" == "static" ]]; then
+    cat <<EOF
+
+Static fallback site:
+  Web root: ${SITE_DIR}
+  Index: ${SITE_DIR}/index.html
+
+To customize:
+  nano ${SITE_DIR}/index.html
+  systemctl reload ${SERVICE_NAME}
+EOF
+  elif [[ "$SITE_MODE" == "reverse" ]]; then
+    cat <<EOF
+
+Reverse fallback site:
+  Upstream: ${UPSTREAM_BASE}
+  Upstream host: ${UPSTREAM_HOST}
+
+To change upstream:
+  Re-run this script and choose 1. 一键安装 / 重新配置
+  or edit ${CADDYFILE} carefully, then run:
+  ${INSTALL_BIN} validate --config ${CADDYFILE}
+  systemctl reload ${SERVICE_NAME}
+EOF
+  fi
 }
 
 run_install_flow() {
