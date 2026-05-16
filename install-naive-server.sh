@@ -34,6 +34,7 @@ SERVICE_FILE="/etc/systemd/system/${DEFAULT_SERVICE_NAME}.service"
 
 AUTO_UPDATE=0
 NO_START=0
+INTERACTIVE=0
 DO_UNINSTALL=0
 DO_PURGE=0
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
@@ -58,6 +59,7 @@ usage() {
   cat <<'USAGE'
 Usage:
   bash install-naive-server.sh --domain DOMAIN [options]
+  bash install-naive-server.sh --interactive
   bash install-naive-server.sh --uninstall
   bash install-naive-server.sh --purge
 
@@ -73,6 +75,7 @@ Options:
   --repo OWNER/REPO            GitHub Release repo. Default: ike-sh/caddy-naive-builder.
   --install-bin PATH           Caddy install path. Default: /usr/local/bin/caddy.
   --service-name NAME          systemd service name. Default: caddy.
+  --interactive, -i            Run the interactive installation wizard.
   --auto-update                Install and enable a daily systemd update timer.
   --no-start                   Write files only; do not enable or start services/timers.
   --uninstall                  Uninstall service units and updater; keep config/site/data.
@@ -91,6 +94,11 @@ refresh_paths() {
 
 parse_args() {
   if [[ $# -eq 0 ]]; then
+    if [[ -t 0 ]]; then
+      INTERACTIVE=1
+      refresh_paths
+      return 0
+    fi
     usage
     exit 1
   fi
@@ -142,6 +150,9 @@ parse_args() {
         [[ $# -gt 0 ]] || die "--service-name requires a value."
         SERVICE_NAME="$1"
         ;;
+      --interactive|-i)
+        INTERACTIVE=1
+        ;;
       --auto-update)
         AUTO_UPDATE=1
         ;;
@@ -166,6 +177,225 @@ parse_args() {
   done
 
   refresh_paths
+}
+
+prompt_text() {
+  local var_name="$1"
+  local label="$2"
+  local required="$3"
+  local example="${4:-}"
+  local current input value prompt
+
+  while true; do
+    current="${!var_name}"
+    if [[ -n "$current" ]]; then
+      prompt="${label} [${current}]: "
+    elif [[ -n "$example" ]]; then
+      prompt="${label} (${example}): "
+    else
+      prompt="${label}: "
+    fi
+
+    printf '%s' "$prompt"
+    IFS= read -r input || die "Input cancelled."
+    if [[ -z "$input" ]]; then
+      value="$current"
+    else
+      value="$input"
+    fi
+
+    if [[ "$required" == "required" && -z "$value" ]]; then
+      log_warn "${label} cannot be empty."
+      continue
+    fi
+
+    printf -v "$var_name" '%s' "$value"
+    return 0
+  done
+}
+
+prompt_password() {
+  local first second
+
+  while true; do
+    if [[ -n "$AUTH_PASS" ]]; then
+      printf '认证密码 PASS [已提供，回车保留；输入新密码可覆盖]: '
+    else
+      printf '认证密码 PASS [回车自动生成强随机密码]: '
+    fi
+
+    IFS= read -r -s first || die "Input cancelled."
+    printf '\n'
+
+    if [[ -z "$first" ]]; then
+      return 0
+    fi
+
+    printf '请再次输入认证密码 PASS: '
+    IFS= read -r -s second || die "Input cancelled."
+    printf '\n'
+
+    if [[ "$first" == "$second" ]]; then
+      AUTH_PASS="$first"
+      return 0
+    fi
+
+    log_warn "两次输入的密码不一致，请重新输入。"
+  done
+}
+
+prompt_site_mode() {
+  local input default_label
+
+  while true; do
+    default_label="$SITE_MODE"
+    printf '回落网站模式 SITE_MODE [%s]\n' "$default_label"
+    printf '  1) static，本地静态页面，推荐\n'
+    printf '  2) reverse，反代其他网站\n'
+    printf '请选择 [1/2/static/reverse，回车默认 %s]: ' "$default_label"
+    IFS= read -r input || die "Input cancelled."
+
+    case "$input" in
+      "")
+        [[ "$SITE_MODE" == "static" || "$SITE_MODE" == "reverse" ]] || SITE_MODE="static"
+        return 0
+        ;;
+      1|static|STATIC)
+        SITE_MODE="static"
+        return 0
+        ;;
+      2|reverse|REVERSE)
+        SITE_MODE="reverse"
+        return 0
+        ;;
+      *)
+        log_warn "Please choose static or reverse."
+        ;;
+    esac
+  done
+}
+
+prompt_yes_no() {
+  local question="$1"
+  local default="$2"
+  local input suffix normalized
+
+  if [[ "$default" == "Y" ]]; then
+    suffix="[Y/n]"
+  else
+    suffix="[y/N]"
+  fi
+
+  while true; do
+    printf '%s %s ' "$question" "$suffix"
+    IFS= read -r input || die "Input cancelled."
+    normalized="${input,,}"
+
+    if [[ -z "$normalized" ]]; then
+      if [[ "$default" == "Y" ]]; then
+        return 0
+      fi
+      return 1
+    fi
+
+    case "$normalized" in
+      y|yes) return 0 ;;
+      n|no) return 1 ;;
+      *) log_warn "Please answer y or n." ;;
+    esac
+  done
+}
+
+print_install_summary() {
+  local password_label upstream_label email_label start_label auto_update_label
+
+  if [[ -n "$AUTH_PASS" ]]; then
+    password_label="provided, hidden"
+  else
+    password_label="auto-generate"
+  fi
+
+  email_label="${EMAIL:-not set}"
+  upstream_label="${UPSTREAM:-not set}"
+  if [[ "$AUTO_UPDATE" -eq 1 ]]; then
+    auto_update_label="yes"
+  else
+    auto_update_label="no"
+  fi
+  if [[ "$NO_START" -eq 1 ]]; then
+    start_label="no"
+  else
+    start_label="yes"
+  fi
+
+  cat <<SUMMARY
+
+Installation summary:
+  Domain: ${DOMAIN}
+  Email: ${email_label}
+  User: ${AUTH_USER:-auto-generate}
+  Password: ${password_label}
+  Site mode: ${SITE_MODE}
+  Upstream: ${upstream_label}
+  Auto update: ${auto_update_label}
+  Start service now: ${start_label}
+SUMMARY
+}
+
+confirm_interactive_install() {
+  local answer
+  printf '\n确认开始安装？[y/N] '
+  IFS= read -r answer || die "Input cancelled."
+  case "${answer,,}" in
+    y|yes)
+      return 0
+      ;;
+    *)
+      log_warn "Installation cancelled."
+      exit 0
+      ;;
+  esac
+}
+
+run_interactive_wizard() {
+  cat <<'TITLE'
+NaiveProxy Server 一键部署向导
+
+TITLE
+
+  prompt_text DOMAIN "部署域名 DOMAIN" "required" "示例：proxy.example.com"
+  prompt_text EMAIL "ACME 邮箱 EMAIL，可选" "optional"
+  prompt_text AUTH_USER "认证用户名 USER，可选" "optional"
+  prompt_password
+  prompt_site_mode
+
+  if [[ "$SITE_MODE" == "reverse" ]]; then
+    while true; do
+      prompt_text UPSTREAM "upstream URL" "required" "示例：https://www.example.org"
+      if [[ "$UPSTREAM" =~ ^https?:// ]]; then
+        break
+      fi
+      log_warn "upstream URL must start with http:// or https://."
+      UPSTREAM=""
+    done
+  else
+    UPSTREAM=""
+  fi
+
+  if prompt_yes_no "是否启用自动更新 auto-update" "N"; then
+    AUTO_UPDATE=1
+  else
+    AUTO_UPDATE=0
+  fi
+
+  if prompt_yes_no "是否现在启动服务" "Y"; then
+    NO_START=0
+  else
+    NO_START=1
+  fi
+
+  print_install_summary
+  confirm_interactive_install
 }
 
 require_root() {
@@ -201,6 +431,49 @@ require_amd64() {
   esac
 }
 
+print_disk_cleanup_hint() {
+  cat >&2 <<'HINT'
+Please free disk space and try again. Useful commands:
+  df -h
+  apt clean
+  rm -rf /var/lib/apt/lists/*
+  journalctl --vacuum-size=100M
+HINT
+}
+
+check_root_free_space() {
+  local df_output available
+
+  if ! command -v df >/dev/null 2>&1; then
+    log_warn "Cannot check root filesystem free space: df command not found."
+    return 0
+  fi
+
+  if ! df_output="$(df -Pm / 2>/dev/null)"; then
+    log_warn "Cannot check root filesystem free space: df -Pm / failed."
+    return 0
+  fi
+
+  if ! command -v awk >/dev/null 2>&1; then
+    log_warn "Cannot parse root filesystem free space: awk command not found."
+    return 0
+  fi
+
+  available="$(awk 'NR == 2 { print $4 }' <<< "$df_output")"
+  if [[ ! "$available" =~ ^[0-9]+$ ]]; then
+    log_warn "Cannot parse root filesystem free space from df output."
+    return 0
+  fi
+
+  if (( available < 300 )); then
+    log_error "Root filesystem has less than 300MB free space."
+    print_disk_cleanup_hint
+    exit 1
+  fi
+
+  log_info "Root filesystem free space: ${available}MB."
+}
+
 install_dependencies() {
   local deps=(
     curl
@@ -211,8 +484,23 @@ install_dependencies() {
     systemd
     coreutils
   )
+  local apt_log
+
   log_info "Installing base dependencies with apt-get..."
-  apt-get update
+  apt_log="$(mktemp)"
+  if ! apt-get update >"$apt_log" 2>&1; then
+    if grep -qi "No space left on device" "$apt_log"; then
+      log_error "apt-get update failed: No space left on device."
+      print_disk_cleanup_hint
+    else
+      log_error "apt-get update failed:"
+      cat "$apt_log" >&2
+    fi
+    rm -f "$apt_log"
+    exit 1
+  fi
+  rm -f "$apt_log"
+
   DEBIAN_FRONTEND=noninteractive apt-get install -y "${deps[@]}"
   log_ok "Dependencies are ready."
 }
@@ -294,7 +582,7 @@ prepare_credentials() {
   existing_pass="$(read_env_value PASS || true)"
 
   if [[ -z "$AUTH_USER" ]]; then
-    if [[ -n "$existing_user" ]]; then
+    if [[ "$INTERACTIVE" -eq 0 && -n "$existing_user" ]]; then
       AUTH_USER="$existing_user"
       log_info "Reusing existing Basic Auth username from $ENV_FILE."
     else
@@ -304,7 +592,7 @@ prepare_credentials() {
   fi
 
   if [[ -z "$AUTH_PASS" ]]; then
-    if [[ -n "$existing_pass" ]]; then
+    if [[ "$INTERACTIVE" -eq 0 && -n "$existing_pass" ]]; then
       AUTH_PASS="$existing_pass"
       log_info "Reusing existing Basic Auth password from $ENV_FILE."
     else
@@ -465,6 +753,7 @@ verify_sha256() {
 }
 
 download_release_caddy() {
+  check_root_free_space
   TMP_DIR="$(mktemp -d)"
   local archive_url sha_url extract_dir caddy_path
   archive_url="https://github.com/${REPO}/releases/latest/download/${ASSET_NAME}"
@@ -850,6 +1139,49 @@ require_amd64() {
   esac
 }
 
+print_disk_cleanup_hint() {
+  cat >&2 <<'HINT'
+Please free disk space and try again. Useful commands:
+  df -h
+  apt clean
+  rm -rf /var/lib/apt/lists/*
+  journalctl --vacuum-size=100M
+HINT
+}
+
+check_root_free_space() {
+  local df_output available
+
+  if ! command -v df >/dev/null 2>&1; then
+    log_warn "Cannot check root filesystem free space: df command not found."
+    return 0
+  fi
+
+  if ! df_output="$(df -Pm / 2>/dev/null)"; then
+    log_warn "Cannot check root filesystem free space: df -Pm / failed."
+    return 0
+  fi
+
+  if ! command -v awk >/dev/null 2>&1; then
+    log_warn "Cannot parse root filesystem free space: awk command not found."
+    return 0
+  fi
+
+  available="$(awk 'NR == 2 { print $4 }' <<< "$df_output")"
+  if [[ ! "$available" =~ ^[0-9]+$ ]]; then
+    log_warn "Cannot parse root filesystem free space from df output."
+    return 0
+  fi
+
+  if (( available < 300 )); then
+    log_error "Root filesystem has less than 300MB free space."
+    print_disk_cleanup_hint
+    exit 1
+  fi
+
+  log_info "Root filesystem free space: ${available}MB."
+}
+
 load_env_defaults() {
   local override_repo="${REPO-}"
   local override_install_bin="${INSTALL_BIN-}"
@@ -1022,6 +1354,7 @@ main() {
   require_command install
   require_command systemctl
 
+  check_root_free_space
   download_release_caddy
   install_binary
   validate_caddyfile
@@ -1220,23 +1553,30 @@ EOF
 
 main() {
   parse_args "$@"
-  require_root
 
   if [[ "$DO_PURGE" -eq 1 ]]; then
+    require_root
     purge_all
     exit 0
   fi
 
   if [[ "$DO_UNINSTALL" -eq 1 ]]; then
+    require_root
     uninstall_service
     exit 0
   fi
 
+  if [[ "$INTERACTIVE" -eq 1 ]]; then
+    run_interactive_wizard
+  fi
+
+  require_root
   require_supported_os
   require_amd64
   validate_domain
   validate_common_args
   parse_upstream
+  check_root_free_space
   install_dependencies
   prepare_credentials
   check_dns
