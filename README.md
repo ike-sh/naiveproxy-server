@@ -6,20 +6,20 @@ Builder 仓库：https://github.com/ike-sh/caddy-naive-builder
 
 这是一个 Debian/Ubuntu `linux-amd64` 服务器上的 NaiveProxy 服务端一键管理脚本。脚本直接下载 Builder Release 里的 Caddy naive 二进制，不安装 Go，不安装 xcaddy，也不在服务器本地编译 Caddy。
 
-Release 资产名固定为：
+Release 资产名称固定为：
 
 - `caddy-naive-linux-amd64.tar.gz`
 - `caddy-naive-linux-amd64.tar.gz.sha256`
 
 ## 主菜单
 
-无参数运行会进入主菜单，不会直接安装：
+无参数且在终端中运行时，会进入主菜单，不会直接安装：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/ike-sh/naiveproxy-server/main/install-naive-server.sh)
 ```
 
-显式主菜单：
+显式进入主菜单：
 
 ```bash
 bash <(curl -fsSL https://raw.githubusercontent.com/ike-sh/naiveproxy-server/main/install-naive-server.sh) --menu
@@ -49,6 +49,9 @@ bash <(wget -qO- https://raw.githubusercontent.com/ike-sh/naiveproxy-server/main
 
 ```text
 NaiveProxy Server 管理菜单
+作者：ike-sh
+GitHub：https://github.com/ike-sh/naiveproxy-server
+Builder：https://github.com/ike-sh/caddy-naive-builder
 -------------------------------------------------
 1. 一键安装 / 重新配置
 2. 查看当前状态
@@ -60,24 +63,105 @@ NaiveProxy Server 管理菜单
 8. 显示客户端配置
 9. 查看运行日志
 10. 回落网站说明 / 配置位置
+11. SSL / 证书诊断
+12. 重新申请本地证书 acme.sh
 0. 退出
 ```
 
 菜单项执行失败会显示错误并返回菜单，不会直接退出到 shell。只有选择 `0. 退出` 或按 `Ctrl+C` 才会离开主菜单。
 
-## 无人值守安装
+## 推荐证书模式
 
-带完整参数时会直接安装，不进入菜单：
+推荐使用：
 
 ```bash
-bash install-naive-server.sh --domain example.com --email me@example.com --site-mode static --auto-update
+--cert-mode acme-standalone
+```
+
+证书模式说明：
+
+- `caddy-auto`：Caddy 自动申请证书，最简单，但部分机器访问 Let's Encrypt / ZeroSSL 可能超时。
+- `caddy-zerossl`：Caddy 强制使用 ZeroSSL。
+- `acme-standalone`：先用 `acme.sh + ZeroSSL standalone` 签发证书，再让 Caddy 使用本地证书文件，稳定性最好，当前默认推荐。
+
+本地证书路径：
+
+```text
+/etc/caddy/certs/DOMAIN/fullchain.pem
+/etc/caddy/certs/DOMAIN/privkey.pem
+```
+
+如果浏览器出现 `ERR_SSL_PROTOCOL_ERROR`，优先运行：
+
+```bash
+bash install-naive-server.sh --tls-diagnose
+bash install-naive-server.sh --issue-cert
+```
+
+## 安装示例
+
+交互安装：
+
+```bash
+bash <(curl -fsSL https://raw.githubusercontent.com/ike-sh/naiveproxy-server/main/install-naive-server.sh)
+```
+
+无人值守安装：
+
+```bash
+bash install-naive-server.sh \
+  --domain example.com \
+  --email me@example.com \
+  --site-mode static \
+  --cert-mode acme-standalone \
+  --auto-update
 ```
 
 反代模式：
 
 ```bash
-bash install-naive-server.sh --domain example.com --email me@example.com --site-mode reverse --upstream https://www.example.org
+bash install-naive-server.sh \
+  --domain example.com \
+  --email me@example.com \
+  --site-mode reverse \
+  --upstream https://www.example.org \
+  --cert-mode acme-standalone
 ```
+
+只写入文件、不启动服务：
+
+```bash
+bash install-naive-server.sh \
+  --domain example.com \
+  --email me@example.com \
+  --site-mode static \
+  --cert-mode acme-standalone \
+  --no-start
+```
+
+带完整参数时会直接无人值守安装，不进入菜单。管道/非 TTY 场景无参数运行会显示 usage 并非 0 退出。
+
+## 证书维护
+
+重新申请本地证书：
+
+```bash
+bash install-naive-server.sh --issue-cert
+```
+
+证书诊断：
+
+```bash
+bash install-naive-server.sh --tls-diagnose
+```
+
+状态中会显示：
+
+- `CERT_MODE`
+- `CERT_FULLCHAIN`
+- `CERT_KEY`
+- 证书文件是否存在
+- 证书 issuer / subject / 过期时间
 
 ## 回落站点模式
 
@@ -87,35 +171,60 @@ bash install-naive-server.sh --domain example.com --email me@example.com --site-
 - 首页文件：`/var/www/naive/index.html`
 - 适合放一个普通首页、产品页或个人页
 
-修改后执行：
+手动上传 HTML/CSS/JS/图片后，推荐执行：
 
 ```bash
 chown -R caddy:caddy /var/www/naive
 find /var/www/naive -type d -exec chmod 755 {} \;
 find /var/www/naive -type f -exec chmod 644 {} \;
+caddy validate --config /etc/caddy/Caddyfile
 systemctl reload caddy
 ```
-
-如果你手动上传 HTML、CSS、JS、图片等文件，推荐上传后执行上面的权限修复命令，确保 Caddy 的 `caddy` 用户可以正常读取静态文件。
 
 `reverse`：反代一个正常网站作为回落站。
 
 - 输入 upstream，例如：`https://www.example.org`
 - 脚本会生成 `reverse_proxy` 配置
-- 第三方站可能有 CSP、Cookie、跳转、Host 校验和合规问题
+- 第三方站可能受 CSP、Cookie、跳转、Host 校验和合规影响
 - 建议只反代自己有权使用的网站或普通公开静态站
 
-菜单 `10. 回落网站说明 / 配置位置` 会显示：
+菜单 `10. 回落网站说明 / 配置位置` 会显示 Caddyfile、静态站目录、客户端配置、安装信息、更新脚本和证书路径。
 
-- `Caddyfile: /etc/caddy/Caddyfile`
-- `Static web root: /var/www/naive`
-- `Static index: /var/www/naive/index.html`
-- `Client config: /root/naive-client-config.json`
-- `Node link: /root/naive-node-link.txt`
-- `Install env: /etc/caddy/naive.env`
-- `Updater: /usr/local/bin/update-caddy-naive`
+## 客户端配置
 
-如果已经安装，还会显示 `DOMAIN`、`SITE_MODE`、`UPSTREAM`、`REPO`、`INSTALL_BIN`、`BUILDER_RELEASE_TAG` 和 `BUILDER_RELEASE_SHA256`。
+安装成功后会输出 NaiveProxy 节点链接：
+
+```text
+https://USER:PASS@DOMAIN
+```
+
+NaiveProxy 没有像 VLESS 一样统一的 `vless://` 分享格式。这里提供的是 HTTPS 代理地址，适用于 `naive-client-config.json` 的 `proxy` 字段，也方便复制保存。
+
+脚本会保存：
+
+- `/root/naive-node-link.txt`
+- `/root/naive-client-config.json`
+- `/root/naive-shadowrocket.txt`
+- `/root/naive-mihomo.yaml`
+- `/root/naive-sing-box.json`
+- `/etc/caddy/naive.env`
+
+JSON 示例：
+
+```json
+{
+  "listen": "socks://127.0.0.1:1080",
+  "proxy": "https://USER:PASS@example.com"
+}
+```
+
+显示客户端配置：
+
+```bash
+bash install-naive-server.sh --show-client
+```
+
+或在主菜单选择 `8. 显示客户端配置`。
 
 ## 常用命令
 
@@ -126,11 +235,13 @@ bash install-naive-server.sh --status
 bash install-naive-server.sh --check-update
 bash install-naive-server.sh --update
 bash install-naive-server.sh --force-update
+bash install-naive-server.sh --tls-diagnose
+bash install-naive-server.sh --issue-cert
 bash install-naive-server.sh --show-client
 bash install-naive-server.sh --logs
 ```
 
-手动更新已安装的内核：
+手动更新已安装的 Caddy naive 内核：
 
 ```bash
 update-caddy-naive
@@ -141,49 +252,6 @@ update-caddy-naive
 ```bash
 systemctl status caddy
 journalctl -u caddy -e --no-pager
-```
-
-## 客户端配置
-
-安装成功后会保存：
-
-- `/root/naive-node-link.txt`
-- `/root/naive-client-config.json`
-- `/etc/caddy/naive.env`
-
-安装完成后会输出 NaiveProxy 节点链接：
-
-```text
-https://USER:PASS@DOMAIN
-```
-
-节点链接会保存到：
-
-```text
-/root/naive-node-link.txt
-```
-
-JSON 配置保存到：
-
-```text
-/root/naive-client-config.json
-```
-
-NaiveProxy 没有像 VLESS 一样统一的 `vless://` 分享格式。这里提供的是 NaiveProxy HTTPS 代理地址，适用于 `naive-client-config.json` 的 `proxy` 字段，也方便复制保存。
-
-示例：
-
-```json
-{
-  "listen": "socks://127.0.0.1:1080",
-  "proxy": "https://USER:PASS@example.com"
-}
-```
-
-连接地址格式：
-
-```text
-https://USER:PASS@DOMAIN
 ```
 
 ## 更新检测
@@ -224,6 +292,9 @@ bash install-naive-server.sh --purge
 - `/var/backups/caddy-naive`
 - `/root/naive-client-config.json`
 - `/root/naive-node-link.txt`
+- `/root/naive-shadowrocket.txt`
+- `/root/naive-mihomo.yaml`
+- `/root/naive-sing-box.json`
 
 执行前需要二次确认。
 
@@ -234,18 +305,29 @@ bash install-naive-server.sh --purge
 - 网站目录：`/var/www/naive`
 - Caddy 数据目录：`/var/lib/caddy`
 - Caddy 配置目录：`/etc/caddy`
+- Caddy 证书目录：`/etc/caddy/certs`
 - 备份目录：`/var/backups/caddy-naive`
 - systemd service：`/etc/systemd/system/caddy.service`
 - 更新脚本：`/usr/local/bin/update-caddy-naive`
-- 客户端配置：`/root/naive-client-config.json`
+- 客户端 JSON 配置：`/root/naive-client-config.json`
 - 节点链接：`/root/naive-node-link.txt`
 - 安装信息：`/etc/caddy/naive.env`
 
 ## 故障排查
 
-证书申请失败：确认域名 A/AAAA 记录指向当前服务器，云安全组和防火墙放行 TCP `80` 和 `443`。
+证书申请失败：确认域名 A/AAAA 记录指向当前服务器，云安全组和防火墙放行 TCP `80` 和 `443`。推荐使用 `--tls-diagnose` 查看证书、端口、DNS 和 HTTPS 探测结果。
 
-端口被占用：脚本会检查 TCP `80` 和 `443`，发现 nginx、apache 或其他服务占用时会退出，不会自动修改这些服务。
+`ERR_SSL_PROTOCOL_ERROR`：优先执行 `bash install-naive-server.sh --tls-diagnose`，然后执行 `bash install-naive-server.sh --issue-cert` 重新签发本地证书。
+
+80/443 被占用：脚本会检查 TCP `80` 和 `443`，发现 nginx、apache 或其他非托管服务占用时会退出，不会自动修改这些服务。
+
+域名没有解析到服务器：`getent ahosts DOMAIN` 无结果时会警告。请检查 DNS 记录和 CDN/代理状态。
+
+`caddy validate` 失败：脚本会恢复 Caddyfile 备份，避免写入无效配置后导致服务挂掉。可查看 `/var/backups/caddy-naive`。
+
+Release 下载失败：确认服务器能访问 GitHub，并确认 Builder Release 中存在固定资产名。
+
+`list-modules` 检查不到 `forward_proxy`：说明下载到的 Caddy 二进制不包含 `klzgrad/forwardproxy` naive 插件，请检查 Builder Release 构建产物。
 
 磁盘空间不足：脚本会在安装依赖前、下载和解压 Release 前检查根分区可用空间，低于 `300MB` 会退出。可先执行：
 
@@ -255,10 +337,6 @@ apt clean
 rm -rf /var/lib/apt/lists/*
 journalctl --vacuum-size=100M
 ```
-
-Release 下载失败：确认服务器能访问 GitHub，并确认 Builder Release 中存在固定资产名。
-
-`list-modules` 检查不到 `forward_proxy`：说明下载到的 Caddy 二进制不包含 `klzgrad/forwardproxy` naive 插件，请检查 Builder Release 构建产物。
 
 ## 限制
 

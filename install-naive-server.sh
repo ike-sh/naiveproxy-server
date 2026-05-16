@@ -23,9 +23,14 @@ BACKUP_DIR="/var/backups/caddy-naive"
 UPDATE_SCRIPT="/usr/local/bin/update-caddy-naive"
 CLIENT_CONFIG="/root/naive-client-config.json"
 NODE_LINK_FILE="/root/naive-node-link.txt"
+SHADOWROCKET_CONFIG="/root/naive-shadowrocket.txt"
+MIHOMO_CONFIG="/root/naive-mihomo.yaml"
+SING_BOX_CONFIG="/root/naive-sing-box.json"
 ENV_FILE="/etc/caddy/naive.env"
 AUTO_UPDATE_SERVICE_FILE="/etc/systemd/system/caddy-naive-update.service"
 AUTO_UPDATE_TIMER_FILE="/etc/systemd/system/caddy-naive-update.timer"
+CERT_BASE_DIR="/etc/caddy/certs"
+ACME_SH="/root/.acme.sh/acme.sh"
 
 DOMAIN=""
 EMAIL=""
@@ -39,6 +44,9 @@ REPO="$DEFAULT_REPO"
 INSTALL_BIN="$DEFAULT_INSTALL_BIN"
 SERVICE_NAME="$DEFAULT_SERVICE_NAME"
 SERVICE_FILE="/etc/systemd/system/${DEFAULT_SERVICE_NAME}.service"
+CERT_MODE="acme-standalone"
+CERT_FULLCHAIN=""
+CERT_KEY=""
 
 AUTO_UPDATE=0
 NO_START=0
@@ -50,6 +58,8 @@ ACTION_UPDATE=0
 ACTION_FORCE_UPDATE=0
 ACTION_SHOW_CLIENT=0
 ACTION_LOGS=0
+ACTION_ISSUE_CERT=0
+ACTION_TLS_DIAGNOSE=0
 DO_UNINSTALL=0
 DO_PURGE=0
 TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
@@ -58,6 +68,7 @@ TMP_DIR=""
 DOWNLOADED_CADDY=""
 DOWNLOADED_ARCHIVE_SHA256=""
 DOWNLOADED_RELEASE_TAG=""
+LAST_CADDYFILE_BACKUP_FOR_RESTORE=""
 
 log_info() { printf '[INFO] %s\n' "$*"; }
 log_warn() { printf '[WARN] %s\n' "$*" >&2; }
@@ -109,11 +120,12 @@ usage() {
   --domain DOMAIN              部署域名，例如 example.com。
 
 选项：
-  --email EMAIL                Caddy 申请 ACME TLS 证书使用的邮箱。
+  --email EMAIL                Caddy 或 acme.sh 申请 ACME TLS 证书使用的邮箱。
   --user USER                  Basic Auth 用户名；不传则自动生成或复用。
   --pass PASS                  Basic Auth 密码；不传则自动生成或复用。
   --site-mode static|reverse   回落网站模式，默认 static。
   --upstream URL               reverse 模式必填。
+  --cert-mode MODE             证书模式：caddy-auto、caddy-zerossl 或 acme-standalone，默认 acme-standalone。
   --repo OWNER/REPO            GitHub Release 仓库，默认：${BUILDER_REPO_DEFAULT}。
   --install-bin PATH           Caddy 安装路径，默认：/usr/local/bin/caddy。
   --service-name NAME          systemd 服务名，默认：caddy。
@@ -126,6 +138,8 @@ usage() {
   --check-update               检测 GitHub Release 是否有新 Caddy naive 内核。
   --update                     更新 Caddy naive 内核。
   --force-update               强制重新安装 latest Caddy naive 内核。
+  --issue-cert                 使用 acme.sh + ZeroSSL standalone 重新申请本地证书并切换 Caddyfile。
+  --tls-diagnose               执行 SSL / 证书诊断。
   --show-client                显示客户端配置。
   --logs                       查看 caddy 日志。
   --uninstall                  卸载服务和更新脚本，保留配置、站点和数据。
@@ -133,13 +147,23 @@ usage() {
   --help                       显示帮助。
 
 示例：
-  bash install-naive-server.sh --domain example.com --email me@example.com --site-mode static
-  bash install-naive-server.sh --domain example.com --site-mode reverse --upstream https://www.example.org
+  bash install-naive-server.sh --domain example.com --email me@example.com --site-mode static --cert-mode acme-standalone
+  bash install-naive-server.sh --domain example.com --email me@example.com --site-mode reverse --upstream https://www.example.org --cert-mode acme-standalone
+  bash install-naive-server.sh --issue-cert
+  bash install-naive-server.sh --tls-diagnose
 USAGE
+}
+
+refresh_cert_paths() {
+  if [[ -n "$DOMAIN" ]]; then
+    CERT_FULLCHAIN="${CERT_BASE_DIR}/${DOMAIN}/fullchain.pem"
+    CERT_KEY="${CERT_BASE_DIR}/${DOMAIN}/privkey.pem"
+  fi
 }
 
 refresh_paths() {
   SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
+  refresh_cert_paths
 }
 
 url_encode() {
@@ -176,6 +200,23 @@ caddyfile_quote() {
   printf '"%s"' "$value"
 }
 
+json_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\t'/\\t}"
+  printf '%s' "$value"
+}
+
+yaml_double_quote() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "$value"
+}
+
 parse_args() {
   if [[ $# -eq 0 ]]; then
     if [[ -t 0 ]]; then
@@ -191,47 +232,52 @@ parse_args() {
     case "$1" in
       --domain)
         shift
-        [[ $# -gt 0 ]] || die "--domain requires a value."
+        [[ $# -gt 0 ]] || die "--domain 需要一个值。"
         DOMAIN="$1"
         ;;
       --email)
         shift
-        [[ $# -gt 0 ]] || die "--email requires a value."
+        [[ $# -gt 0 ]] || die "--email 需要一个值。"
         EMAIL="$1"
         ;;
       --user)
         shift
-        [[ $# -gt 0 ]] || die "--user requires a value."
+        [[ $# -gt 0 ]] || die "--user 需要一个值。"
         AUTH_USER="$1"
         ;;
       --pass)
         shift
-        [[ $# -gt 0 ]] || die "--pass requires a value."
+        [[ $# -gt 0 ]] || die "--pass 需要一个值。"
         AUTH_PASS="$1"
         ;;
       --site-mode)
         shift
-        [[ $# -gt 0 ]] || die "--site-mode requires a value."
+        [[ $# -gt 0 ]] || die "--site-mode 需要一个值。"
         SITE_MODE="$1"
         ;;
       --upstream)
         shift
-        [[ $# -gt 0 ]] || die "--upstream requires a value."
+        [[ $# -gt 0 ]] || die "--upstream 需要一个值。"
         UPSTREAM="$1"
+        ;;
+      --cert-mode)
+        shift
+        [[ $# -gt 0 ]] || die "--cert-mode 需要一个值。"
+        CERT_MODE="$1"
         ;;
       --repo)
         shift
-        [[ $# -gt 0 ]] || die "--repo requires a value."
+        [[ $# -gt 0 ]] || die "--repo 需要一个值。"
         REPO="$1"
         ;;
       --install-bin)
         shift
-        [[ $# -gt 0 ]] || die "--install-bin requires a value."
+        [[ $# -gt 0 ]] || die "--install-bin 需要一个值。"
         INSTALL_BIN="$1"
         ;;
       --service-name)
         shift
-        [[ $# -gt 0 ]] || die "--service-name requires a value."
+        [[ $# -gt 0 ]] || die "--service-name 需要一个值。"
         SERVICE_NAME="$1"
         ;;
       --menu)
@@ -262,6 +308,12 @@ parse_args() {
       --force-update)
         ACTION_FORCE_UPDATE=1
         ;;
+      --issue-cert)
+        ACTION_ISSUE_CERT=1
+        ;;
+      --tls-diagnose)
+        ACTION_TLS_DIAGNOSE=1
+        ;;
       --show-client)
         ACTION_SHOW_CLIENT=1
         ;;
@@ -279,7 +331,7 @@ parse_args() {
         exit 0
         ;;
       *)
-        die "Unknown argument: $1"
+        die "未知参数：$1"
         ;;
     esac
     shift
@@ -306,7 +358,7 @@ prompt_text() {
     fi
 
     printf '%s' "$prompt"
-    IFS= read -r input || die "Input cancelled."
+    IFS= read -r input || die "输入已取消。"
     if [[ -z "$input" ]]; then
       value="$current"
     else
@@ -333,7 +385,7 @@ prompt_password() {
       printf '认证密码 PASS [回车自动生成强随机密码]: '
     fi
 
-    IFS= read -r -s first || die "Input cancelled."
+    IFS= read -r -s first || die "输入已取消。"
     printf '\n'
 
     if [[ -z "$first" ]]; then
@@ -341,7 +393,7 @@ prompt_password() {
     fi
 
     printf '请再次输入认证密码 PASS: '
-    IFS= read -r -s second || die "Input cancelled."
+    IFS= read -r -s second || die "输入已取消。"
     printf '\n'
 
     if [[ "$first" == "$second" ]]; then
@@ -368,7 +420,7 @@ prompt_site_mode() {
     printf '              注意：第三方网站可能受 CSP、Cookie、跳转、Host 校验和合规影响\n'
     printf '              建议只反代自己有权使用的网站或普通公开静态站\n'
     printf '请选择 [1/2/static/reverse，回车默认 %s]: ' "$default_label"
-    IFS= read -r input || die "Input cancelled."
+    IFS= read -r input || die "输入已取消。"
 
     case "$input" in
       "")
@@ -384,7 +436,46 @@ prompt_site_mode() {
         return 0
         ;;
       *)
-        log_warn "Please choose static or reverse."
+        log_warn "请选择 static 或 reverse。"
+        ;;
+    esac
+  done
+}
+
+prompt_cert_mode() {
+  local input
+
+  while true; do
+    printf '请选择 HTTPS 证书模式：\n'
+    printf '  1) caddy-auto\n'
+    printf '     Caddy 自动申请证书，最简单，但部分机器可能 ACME 超时。\n'
+    printf '  2) caddy-zerossl\n'
+    printf '     Caddy 强制 ZeroSSL。\n'
+    printf '  3) acme-standalone\n'
+    printf '     使用 acme.sh + ZeroSSL standalone 先签证书，然后 Caddy 使用本地证书文件，推荐。\n'
+    printf '默认：acme-standalone\n'
+    printf '请选择 [1/2/3/caddy-auto/caddy-zerossl/acme-standalone，回车默认 %s]: ' "${CERT_MODE:-acme-standalone}"
+    IFS= read -r input || die "输入已取消。"
+
+    case "$input" in
+      "")
+        [[ -n "$CERT_MODE" ]] || CERT_MODE="acme-standalone"
+        return 0
+        ;;
+      1|caddy-auto)
+        CERT_MODE="caddy-auto"
+        return 0
+        ;;
+      2|caddy-zerossl)
+        CERT_MODE="caddy-zerossl"
+        return 0
+        ;;
+      3|acme-standalone)
+        CERT_MODE="acme-standalone"
+        return 0
+        ;;
+      *)
+        log_warn "请选择 caddy-auto、caddy-zerossl 或 acme-standalone。"
         ;;
     esac
   done
@@ -403,7 +494,7 @@ prompt_yes_no() {
 
   while true; do
     printf '%s %s ' "$question" "$suffix"
-    IFS= read -r input || die "Input cancelled."
+    IFS= read -r input || die "输入已取消。"
     normalized="${input,,}"
 
     if [[ -z "$normalized" ]]; then
@@ -416,7 +507,7 @@ prompt_yes_no() {
     case "$normalized" in
       y|yes) return 0 ;;
       n|no) return 1 ;;
-      *) log_warn "Please answer y or n." ;;
+      *) log_warn "请输入 y 或 n。" ;;
     esac
   done
 }
@@ -452,6 +543,7 @@ print_install_summary() {
   认证密码：${password_label}
   回落模式：${SITE_MODE}
   反代目标：${upstream_label}
+  证书模式：${CERT_MODE}
   自动更新：${auto_update_label}
   立即启动服务：${start_label}
 SUMMARY
@@ -460,7 +552,7 @@ SUMMARY
 confirm_interactive_install() {
   local answer
   printf '\n确认开始安装？[y/N] '
-  IFS= read -r answer || die "Input cancelled."
+  IFS= read -r answer || die "输入已取消。"
   case "${answer,,}" in
     y|yes)
       return 0
@@ -480,6 +572,11 @@ TITLE
 
   prompt_text DOMAIN "部署域名 DOMAIN" "required" "示例：proxy.example.com"
   prompt_text EMAIL "ACME 邮箱 EMAIL，可选" "optional"
+  prompt_cert_mode
+  if [[ "$CERT_MODE" == "acme-standalone" && -z "$EMAIL" ]]; then
+    log_warn "acme-standalone 模式需要邮箱用于注册 ZeroSSL 账户。"
+    prompt_text EMAIL "ACME 邮箱 EMAIL" "required" "示例：me@example.com"
+  fi
   prompt_text AUTH_USER "认证用户名 USER，可选" "optional"
   prompt_password
   prompt_site_mode
@@ -592,6 +689,7 @@ check_root_free_space() {
 install_dependencies() {
   local deps=(
     curl
+    socat
     tar
     ca-certificates
     openssl
@@ -626,16 +724,21 @@ validate_domain() {
   [[ "$DOMAIN" != *"/"* ]] || die "--domain 不能包含路径。"
   [[ "$DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]] || die "--domain 包含不支持的字符。"
   [[ "$DOMAIN" == *.* ]] || log_warn "域名不包含点号，公网 TLS 证书申请可能失败。"
+  refresh_cert_paths
 }
 
 validate_common_args() {
   [[ "$SITE_MODE" == "static" || "$SITE_MODE" == "reverse" ]] || die "--site-mode 必须是 static 或 reverse。"
+  [[ "$CERT_MODE" == "caddy-auto" || "$CERT_MODE" == "caddy-zerossl" || "$CERT_MODE" == "acme-standalone" ]] || die "--cert-mode 必须是 caddy-auto、caddy-zerossl 或 acme-standalone。"
   [[ "$REPO" =~ ^[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+$ ]] || die "--repo 必须是 OWNER/REPO 格式。"
   [[ "$INSTALL_BIN" == /* ]] || die "--install-bin 必须是绝对路径。"
   [[ "$INSTALL_BIN" != *[[:space:]]* ]] || die "--install-bin 不能包含空白字符。"
   [[ "$SERVICE_NAME" =~ ^[A-Za-z0-9_.@-]+$ ]] || die "--service-name 包含不支持的字符。"
   if [[ -n "$EMAIL" ]]; then
     [[ "$EMAIL" != *[[:space:]]* ]] || die "--email 不能包含空白字符。"
+  fi
+  if [[ "$CERT_MODE" == "acme-standalone" ]]; then
+    [[ -n "$EMAIL" ]] || die "--cert-mode acme-standalone 需要提供 --email，用于注册 ZeroSSL 账户。"
   fi
 }
 
@@ -687,6 +790,8 @@ load_saved_install_info() {
 
   value="$(read_env_value DOMAIN || true)"
   [[ -n "$value" ]] && DOMAIN="$value"
+  value="$(read_env_value EMAIL || true)"
+  [[ -n "$value" ]] && EMAIL="$value"
   value="$(read_env_value USER || true)"
   [[ -n "$value" ]] && AUTH_USER="$value"
   value="$(read_env_value PASS || true)"
@@ -701,8 +806,17 @@ load_saved_install_info() {
   [[ -n "$value" ]] && INSTALL_BIN="$value"
   value="$(read_env_value SERVICE_NAME || true)"
   [[ -n "$value" ]] && SERVICE_NAME="$value"
+  value="$(read_env_value CERT_MODE || true)"
+  [[ -n "$value" ]] && CERT_MODE="$value"
+  value="$(read_env_value CERT_FULLCHAIN || true)"
+  [[ -n "$value" ]] && CERT_FULLCHAIN="$value"
+  value="$(read_env_value CERT_KEY || true)"
+  [[ -n "$value" ]] && CERT_KEY="$value"
 
   refresh_paths
+  if [[ -n "$DOMAIN" && ( -z "$CERT_FULLCHAIN" || -z "$CERT_KEY" ) ]]; then
+    refresh_cert_paths
+  fi
 }
 
 validate_credential_token() {
@@ -768,11 +882,11 @@ backup_file() {
 
 check_dns() {
   if getent ahosts "$DOMAIN" >/dev/null 2>&1; then
-    log_ok "DNS lookup succeeded for $DOMAIN."
+    log_ok "DNS 解析成功：$DOMAIN"
   else
     log_warn "$DOMAIN DNS 解析失败。继续执行，但 ACME 证书申请可能失败。"
   fi
-  log_info "Ensure ${DOMAIN} A/AAAA records point to this server and cloud security groups allow TCP 80/443."
+  log_info "请确认 ${DOMAIN} 的 A/AAAA 记录指向本机，并且云安全组放行 TCP 80/443。"
 }
 
 port_listeners() {
@@ -832,16 +946,16 @@ check_ports_available() {
     done <<< "$listeners"
 
     if [[ -n "$unmanaged" ]]; then
-      log_error "TCP port ${port} is already occupied:"
+      log_error "TCP ${port} 端口已被占用："
       printf '%s' "$unmanaged" >&2
       conflict=1
     else
-      log_info "TCP port ${port} is currently used by the managed ${SERVICE_NAME} service; continuing for repeat install."
+      log_info "TCP ${port} 端口当前由本脚本管理的 ${SERVICE_NAME} 服务占用，按重复安装处理。"
     fi
   done
 
   if [[ "$conflict" -ne 0 ]]; then
-    die "Please stop the conflicting service, then run this script again. This script will not modify nginx/apache or firewall rules."
+    die "请先停止冲突服务后重试。本脚本不会自动修改 nginx/apache 或防火墙规则。"
   fi
 }
 
@@ -867,7 +981,7 @@ ensure_caddy_user_and_dirs() {
   chmod 750 "$DATA_DIR"
   chmod 755 "$SITE_DIR"
   chmod 700 "$BACKUP_DIR"
-  log_ok "Directories are ready."
+  log_ok "目录和权限已准备就绪。"
 }
 
 verify_sha256() {
@@ -924,11 +1038,11 @@ download_release_caddy() {
 show_caddy_version_and_check_modules() {
   local version modules
   version="$("$INSTALL_BIN" version 2>&1)"
-  log_info "Caddy version: $version"
+  log_info "Caddy 版本：$version"
 
   modules="$("$INSTALL_BIN" list-modules 2>&1)"
   if ! grep -Eiq 'forward_proxy|forwardproxy' <<< "$modules"; then
-    log_error "Installed Caddy does not report forward_proxy/forwardproxy in list-modules."
+    log_error "已安装的 Caddy list-modules 未检测到 forward_proxy/forwardproxy。"
     printf '%s\n' "$modules" >&2
     return 1
   fi
@@ -936,7 +1050,7 @@ show_caddy_version_and_check_modules() {
 }
 
 install_caddy_binary() {
-  [[ -n "$DOWNLOADED_CADDY" ]] || die "Internal error: downloaded caddy path is empty."
+  [[ -n "$DOWNLOADED_CADDY" ]] || die "内部错误：下载的 caddy 路径为空。"
   mkdir -p "$(dirname "$INSTALL_BIN")"
 
   local previous_backup=""
@@ -1125,9 +1239,17 @@ fix_static_site_permissions() {
 
 write_caddyfile_content() {
   local order_mode="$1"
+  local tls_mode="${2:-$CERT_MODE}"
   local auth_user_caddy auth_pass_caddy
   auth_user_caddy="$(caddyfile_quote "$AUTH_USER")"
   auth_pass_caddy="$(caddyfile_quote "$AUTH_PASS")"
+
+  if [[ "$tls_mode" == "acme-standalone" ]]; then
+    if [[ ! -s "$CERT_FULLCHAIN" || ! -s "$CERT_KEY" ]]; then
+      die "本地证书文件不存在或为空，拒绝写入本地证书 Caddyfile：${CERT_FULLCHAIN} / ${CERT_KEY}"
+    fi
+  fi
+
   {
     printf '{\n'
     if [[ "$order_mode" == "strict" ]]; then
@@ -1136,11 +1258,21 @@ write_caddyfile_content() {
     else
       printf '  order forward_proxy first\n'
     fi
+    if [[ "$tls_mode" == "caddy-zerossl" ]]; then
+      printf '  acme_ca https://acme.zerossl.com/v2/DV90\n'
+    fi
     printf '  admin off\n'
     printf '}\n\n'
+    if [[ "$tls_mode" == "acme-standalone" ]]; then
+      printf 'http://%s {\n' "$DOMAIN"
+      printf '  redir https://{host}{uri} permanent\n'
+      printf '}\n\n'
+    fi
     printf '%s {\n' "$DOMAIN"
     printf '  encode zstd gzip\n'
-    if [[ -n "$EMAIL" ]]; then
+    if [[ "$tls_mode" == "acme-standalone" ]]; then
+      printf '  tls %s %s\n' "$CERT_FULLCHAIN" "$CERT_KEY"
+    elif [[ -n "$EMAIL" ]]; then
       printf '  tls %s\n' "$EMAIL"
     fi
     printf '\n'
@@ -1187,29 +1319,58 @@ validate_caddyfile() {
 }
 
 write_and_validate_caddyfile() {
+  local tls_mode="${1:-$CERT_MODE}"
   local caddyfile_backup=""
   backup_file "$CADDYFILE"
   caddyfile_backup="$LAST_BACKUP_PATH"
+  LAST_CADDYFILE_BACKUP_FOR_RESTORE="$caddyfile_backup"
 
-  write_caddyfile_content "strict"
+  write_caddyfile_content "strict" "$tls_mode"
   if validate_caddyfile; then
     return 0
   fi
 
   log_warn "正在改用等价的单条 order 指令重试：order forward_proxy first。"
-  write_caddyfile_content "first"
+  write_caddyfile_content "first" "$tls_mode"
   if validate_caddyfile; then
     return 0
   fi
 
   if [[ -n "$caddyfile_backup" ]]; then
     cp -a "$caddyfile_backup" "$CADDYFILE"
-    log_warn "Restored previous Caddyfile from $caddyfile_backup."
+    log_warn "已从备份恢复旧 Caddyfile：$caddyfile_backup"
     die "Caddyfile 校验失败。备份位于：$caddyfile_backup"
   fi
 
   rm -f "$CADDYFILE"
   die "Caddyfile 校验失败，且没有可用的旧 Caddyfile 备份。"
+}
+
+restore_caddyfile_backup() {
+  if [[ -n "$LAST_CADDYFILE_BACKUP_FOR_RESTORE" && -f "$LAST_CADDYFILE_BACKUP_FOR_RESTORE" ]]; then
+    cp -a "$LAST_CADDYFILE_BACKUP_FOR_RESTORE" "$CADDYFILE"
+    log_warn "已恢复 Caddyfile 备份：$LAST_CADDYFILE_BACKUP_FOR_RESTORE"
+    return 0
+  fi
+
+  return 1
+}
+
+cert_files_ready() {
+  [[ -s "$CERT_FULLCHAIN" && -s "$CERT_KEY" ]]
+}
+
+write_caddyfile_local_cert() {
+  refresh_cert_paths
+  if ! cert_files_ready; then
+    die "本地证书文件不存在或为空，不能写入本地证书 Caddyfile：${CERT_FULLCHAIN} / ${CERT_KEY}"
+  fi
+
+  write_and_validate_caddyfile "acme-standalone"
+}
+
+write_caddyfile_auto_zerossl() {
+  write_and_validate_caddyfile "caddy-zerossl"
 }
 
 write_systemd_service() {
@@ -1241,6 +1402,117 @@ WantedBy=multi-user.target
 SERVICE
   chmod 644 "$SERVICE_FILE"
   log_ok "systemd service 已写入：$SERVICE_FILE"
+}
+
+install_acme_sh() {
+  [[ -n "$EMAIL" ]] || die "acme.sh + ZeroSSL standalone 模式需要 EMAIL。"
+  command -v curl >/dev/null 2>&1 || die "安装 acme.sh 需要 curl。"
+
+  if [[ ! -x "$ACME_SH" ]]; then
+    local installer="/tmp/acme-install.sh"
+    log_info "正在安装 acme.sh..."
+    curl -fsSL https://get.acme.sh -o "$installer"
+    sh "$installer" "email=${EMAIL}"
+  else
+    log_info "已检测到 acme.sh：$ACME_SH"
+  fi
+
+  [[ -x "$ACME_SH" ]] || die "acme.sh 安装失败：$ACME_SH 不存在或不可执行。"
+  "$ACME_SH" --set-default-ca --server zerossl
+  "$ACME_SH" --register-account -m "$EMAIL" --server zerossl || true
+  log_ok "acme.sh / ZeroSSL 已就绪。"
+}
+
+check_port80_for_acme_standalone() {
+  local listeners line conflict=0
+  listeners="$(port_listeners 80)"
+  [[ -n "$listeners" ]] || return 0
+
+  while IFS= read -r line; do
+    [[ -n "$line" ]] || continue
+    if grep -Eiq 'caddy|acme\.sh' <<< "$line"; then
+      log_warn "80 端口当前由 Caddy/acme.sh 相关进程占用，acme.sh 会再次尝试停止 Caddy：$line"
+      continue
+    fi
+    log_error "80 端口被非 Caddy/acme.sh 进程占用，无法使用 standalone 验证：$line"
+    conflict=1
+  done <<< "$listeners"
+
+  [[ "$conflict" -eq 0 ]] || die "请先释放 80 端口后重试。"
+}
+
+issue_cert_with_acme_standalone() {
+  local issue_backup=""
+  refresh_cert_paths
+  [[ -n "$DOMAIN" ]] || die "缺少 DOMAIN，无法申请证书。"
+  [[ -n "$EMAIL" ]] || die "缺少 EMAIL，无法注册 ZeroSSL 账户。"
+  [[ -x "$ACME_SH" ]] || die "未找到 acme.sh：$ACME_SH"
+
+  backup_file "$CADDYFILE"
+  issue_backup="$LAST_BACKUP_PATH"
+
+  systemctl stop "$SERVICE_NAME" >/dev/null 2>&1 || true
+  sleep 2
+  check_port80_for_acme_standalone
+
+  log_info "正在使用 acme.sh + ZeroSSL standalone 申请证书：${DOMAIN}"
+  if ! "$ACME_SH" --issue \
+    --server zerossl \
+    -d "$DOMAIN" \
+    --standalone \
+    --httpport 80 \
+    --force \
+    --pre-hook "systemctl stop ${SERVICE_NAME} || true" \
+    --post-hook "systemctl start ${SERVICE_NAME} || true"; then
+    if [[ -n "$issue_backup" && -f "$issue_backup" ]]; then
+      cp -a "$issue_backup" "$CADDYFILE"
+      log_warn "证书申请失败，已恢复申请前的 Caddyfile：$issue_backup"
+      validate_caddyfile || true
+      systemctl restart "$SERVICE_NAME" >/dev/null 2>&1 || true
+    fi
+    die "acme.sh standalone 申请证书失败。"
+  fi
+
+  log_ok "acme.sh standalone 证书申请成功。"
+}
+
+install_local_cert() {
+  refresh_cert_paths
+  [[ -x "$ACME_SH" ]] || die "未找到 acme.sh：$ACME_SH"
+  mkdir -p "${CERT_BASE_DIR}/${DOMAIN}"
+
+  log_info "正在安装证书到 ${CERT_BASE_DIR}/${DOMAIN} ..."
+  if ! "$ACME_SH" --install-cert -d "$DOMAIN" \
+    --key-file "$CERT_KEY" \
+    --fullchain-file "$CERT_FULLCHAIN" \
+    --reloadcmd "systemctl reload ${SERVICE_NAME} || systemctl restart ${SERVICE_NAME}"; then
+    log_error "acme.sh 安装证书失败。"
+    log_warn "正在恢复为 Caddy ZeroSSL 自动证书配置，避免服务引用不存在的证书文件。"
+    write_caddyfile_auto_zerossl
+    systemctl restart "$SERVICE_NAME" >/dev/null 2>&1 || true
+    die "本地证书安装失败。"
+  fi
+
+  if ! cert_files_ready; then
+    log_error "证书安装后仍未找到有效文件：${CERT_FULLCHAIN} / ${CERT_KEY}"
+    log_warn "正在恢复为 Caddy ZeroSSL 自动证书配置，避免服务引用不存在的证书文件。"
+    write_caddyfile_auto_zerossl
+    systemctl restart "$SERVICE_NAME" >/dev/null 2>&1 || true
+    die "本地证书文件不存在或为空。"
+  fi
+
+  chown -R caddy:caddy "$CERT_BASE_DIR" 2>/dev/null || true
+  chmod 700 "${CERT_BASE_DIR}/${DOMAIN}" 2>/dev/null || true
+  chmod 600 "$CERT_KEY" 2>/dev/null || true
+  chmod 644 "$CERT_FULLCHAIN" 2>/dev/null || true
+  log_ok "本地证书已安装。"
+}
+
+issue_local_cert_workflow() {
+  install_acme_sh
+  issue_cert_with_acme_standalone
+  install_local_cert
+  write_caddyfile_local_cert
 }
 
 write_update_script() {
@@ -1277,7 +1549,7 @@ cleanup() {
 trap cleanup EXIT
 
 require_root() {
-  [[ "${EUID}" -eq 0 ]] || die "This updater must be run as root."
+  [[ "${EUID}" -eq 0 ]] || die "更新脚本必须使用 root 权限运行。"
 }
 
 require_amd64() {
@@ -1289,14 +1561,14 @@ require_amd64() {
       die "当前 Release 只提供 linux-amd64，请不要继续安装。"
       ;;
     *)
-      die "Unsupported architecture: ${arch}. Only linux-amd64 is supported."
+      die "不支持的架构：${arch}。当前仅支持 linux-amd64。"
       ;;
   esac
 }
 
 print_disk_cleanup_hint() {
   cat >&2 <<'HINT'
-Please free disk space and try again. Useful commands:
+请释放磁盘空间后重试。可参考以下命令：
   df -h
   apt clean
   rm -rf /var/lib/apt/lists/*
@@ -1308,23 +1580,23 @@ check_root_free_space() {
   local df_output available
 
   if ! command -v df >/dev/null 2>&1; then
-    log_warn "Cannot check root filesystem free space: df command not found."
+    log_warn "无法检查根分区可用空间：未找到 df 命令。"
     return 0
   fi
 
   if ! df_output="$(df -Pm / 2>/dev/null)"; then
-    log_warn "Cannot check root filesystem free space: df -Pm / failed."
+    log_warn "无法检查根分区可用空间：df -Pm / 执行失败。"
     return 0
   fi
 
   if ! command -v awk >/dev/null 2>&1; then
-    log_warn "Cannot parse root filesystem free space: awk command not found."
+    log_warn "无法解析根分区可用空间：未找到 awk 命令。"
     return 0
   fi
 
   available="$(awk 'NR == 2 { print $4 }' <<< "$df_output")"
   if [[ ! "$available" =~ ^[0-9]+$ ]]; then
-    log_warn "Cannot parse root filesystem free space from df output."
+    log_warn "无法从 df 输出解析根分区可用空间。"
     return 0
   fi
 
@@ -1334,7 +1606,7 @@ check_root_free_space() {
     exit 1
   fi
 
-  log_info "Root filesystem free space: ${available}MB."
+  log_info "根分区可用空间：${available}MB。"
 }
 
 load_env_defaults() {
@@ -1358,7 +1630,7 @@ load_env_defaults() {
 
 require_command() {
   local cmd="$1"
-  command -v "$cmd" >/dev/null 2>&1 || die "Required command not found: $cmd"
+  command -v "$cmd" >/dev/null 2>&1 || die "缺少必需命令：$cmd"
 }
 
 backup_file() {
@@ -1382,7 +1654,7 @@ backup_file() {
   cp -a "$path" "$dest"
   chmod go-rwx "$dest" 2>/dev/null || true
   LAST_BACKUP_PATH="$dest"
-  log_info "Backed up $path -> $dest"
+  log_info "已备份 $path -> $dest"
 }
 
 verify_sha256() {
@@ -1394,16 +1666,16 @@ verify_sha256() {
   if (cd "$dir" && sha256sum -c "$SHA_ASSET_NAME" >/dev/null 2>&1); then
     expected="$(awk '{print $1; exit}' "$sha_file")"
     DOWNLOADED_ARCHIVE_SHA256="$expected"
-    log_ok "SHA256 checksum verified."
+    log_ok "SHA256 校验通过。"
     return 0
   fi
 
   expected="$(awk '{print $1; exit}' "$sha_file")"
   actual="$(sha256sum "$archive" | awk '{print $1}')"
-  [[ -n "$expected" ]] || die "SHA256 file is empty or invalid."
-  [[ "$expected" == "$actual" ]] || die "SHA256 verification failed."
+  [[ -n "$expected" ]] || die "SHA256 文件为空或无效。"
+  [[ "$expected" == "$actual" ]] || die "SHA256 校验失败。"
   DOWNLOADED_ARCHIVE_SHA256="$expected"
-  log_ok "SHA256 checksum verified."
+  log_ok "SHA256 校验通过。"
 }
 
 download_release_caddy() {
@@ -1415,9 +1687,9 @@ download_release_caddy() {
   archive_url="https://github.com/${REPO}/releases/latest/download/${ASSET_NAME}"
   sha_url="https://github.com/${REPO}/releases/latest/download/${SHA_ASSET_NAME}"
 
-  log_info "Downloading $archive_url"
+  log_info "正在下载 $archive_url"
   curl -fL --retry 3 --connect-timeout 20 -o "${TMP_DIR}/${ASSET_NAME}" "$archive_url"
-  log_info "Downloading $sha_url"
+  log_info "正在下载 $sha_url"
   curl -fL --retry 3 --connect-timeout 20 -o "${TMP_DIR}/${SHA_ASSET_NAME}" "$sha_url"
 
   verify_sha256 "$TMP_DIR"
@@ -1426,51 +1698,51 @@ download_release_caddy() {
   mkdir -p "$extract_dir"
   tar -xzf "${TMP_DIR}/${ASSET_NAME}" -C "$extract_dir"
   caddy_path="$(find "$extract_dir" -type f -name caddy | head -n 1)"
-  [[ -n "$caddy_path" ]] || die "The archive does not contain a caddy binary."
+  [[ -n "$caddy_path" ]] || die "压缩包中未找到 caddy 二进制。"
   chmod +x "$caddy_path"
-  [[ -x "$caddy_path" ]] || die "Extracted caddy binary is not executable."
+  [[ -x "$caddy_path" ]] || die "解压出的 caddy 二进制不可执行。"
   DOWNLOADED_CADDY="$caddy_path"
 }
 
 show_caddy_version_and_check_modules() {
   local version modules
   version="$("$INSTALL_BIN" version 2>&1)"
-  log_info "Caddy version: $version"
+  log_info "Caddy 版本：$version"
 
   modules="$("$INSTALL_BIN" list-modules 2>&1)"
   if ! grep -Eiq 'forward_proxy|forwardproxy' <<< "$modules"; then
-    log_error "Installed Caddy does not report forward_proxy/forwardproxy in list-modules."
+    log_error "已安装的 Caddy list-modules 未检测到 forward_proxy/forwardproxy。"
     printf '%s\n' "$modules" >&2
     return 1
   fi
-  log_ok "forward_proxy module detected."
+  log_ok "已检测到 forward_proxy 模块。"
 }
 
 install_binary() {
   local previous_backup=""
-  [[ -n "${DOWNLOADED_CADDY:-}" ]] || die "Internal error: downloaded caddy path is empty."
+  [[ -n "${DOWNLOADED_CADDY:-}" ]] || die "内部错误：下载的 caddy 路径为空。"
   mkdir -p "$(dirname "$INSTALL_BIN")"
   backup_file "$INSTALL_BIN"
   previous_backup="$LAST_BACKUP_PATH"
 
   install -m 0755 "$DOWNLOADED_CADDY" "$INSTALL_BIN"
   if command -v setcap >/dev/null 2>&1; then
-    setcap cap_net_bind_service=+ep "$INSTALL_BIN" || log_warn "setcap failed; systemd AmbientCapabilities should still allow binding to 80/443."
+    setcap cap_net_bind_service=+ep "$INSTALL_BIN" || log_warn "setcap 失败；systemd AmbientCapabilities 通常仍可允许绑定 80/443。"
   fi
 
   if ! show_caddy_version_and_check_modules; then
     if [[ -n "$previous_backup" ]]; then
       cp -a "$previous_backup" "$INSTALL_BIN"
-      log_warn "Restored previous Caddy binary from $previous_backup."
+      log_warn "已从 $previous_backup 恢复旧 Caddy 二进制。"
     fi
-    die "Caddy binary verification failed."
+    die "Caddy 二进制校验失败。"
   fi
 }
 
 validate_caddyfile() {
-  [[ -f "$CADDYFILE" ]] || die "Caddyfile not found: $CADDYFILE"
+  [[ -f "$CADDYFILE" ]] || die "未找到 Caddyfile：$CADDYFILE"
   "$INSTALL_BIN" validate --config "$CADDYFILE"
-  log_ok "Caddyfile validation passed."
+  log_ok "Caddyfile 校验通过。"
 }
 
 service_exists() {
@@ -1480,27 +1752,27 @@ service_exists() {
 
 reload_or_restart_service() {
   if ! service_exists; then
-    log_warn "Service ${SERVICE_NAME} does not exist; binary updated only."
+    log_warn "服务 ${SERVICE_NAME} 不存在；仅更新二进制。"
     return 0
   fi
 
   if ! systemctl is-active --quiet "$SERVICE_NAME"; then
-    log_warn "Service ${SERVICE_NAME} exists but is not active; binary updated only."
+    log_warn "服务 ${SERVICE_NAME} 存在但未运行；仅更新二进制。"
     return 0
   fi
 
   if systemctl reload "$SERVICE_NAME"; then
-    log_ok "Service ${SERVICE_NAME} reloaded."
+    log_ok "服务 ${SERVICE_NAME} 已 reload。"
     return 0
   fi
 
-  log_warn "Reload failed; restarting ${SERVICE_NAME}."
+  log_warn "reload 失败，正在重启 ${SERVICE_NAME}。"
   if ! systemctl restart "$SERVICE_NAME"; then
-    log_error "Restart failed. If status shows a notify timeout, change Type=notify to Type=simple and retry."
+    log_error "重启失败。如果状态显示 notify 超时，可将 Type=notify 改为 Type=simple 后重试。"
     systemctl --no-pager --full status "$SERVICE_NAME" || true
     exit 1
   fi
-  log_ok "Service ${SERVICE_NAME} restarted."
+  log_ok "服务 ${SERVICE_NAME} 已重启。"
 }
 
 update_env_release_sha() {
@@ -1535,7 +1807,7 @@ update_env_release_sha() {
   ' "$ENV_FILE" > "$tmp_file"
   install -m 600 "$tmp_file" "$ENV_FILE"
   rm -f "$tmp_file"
-  log_ok "Updated ${ENV_FILE} release checksum."
+  log_ok "已更新 ${ENV_FILE} 中的 Release 校验值。"
 }
 
 main() {
@@ -1557,7 +1829,7 @@ main() {
   validate_caddyfile
   update_env_release_sha
   reload_or_restart_service
-  log_ok "Caddy naive binary update completed."
+  log_ok "Caddy naive 内核更新完成。"
 }
 
 main "$@"
@@ -1592,11 +1864,81 @@ write_node_link_file() {
   log_ok "节点链接文件已写入：$NODE_LINK_FILE"
 }
 
+write_shadowrocket_config() {
+  local proxy_url
+  proxy_url="$(build_proxy_url)"
+  backup_file "$SHADOWROCKET_CONFIG"
+  umask 077
+  printf '%s#%s\n' "$proxy_url" "$DOMAIN" > "$SHADOWROCKET_CONFIG"
+  chmod 600 "$SHADOWROCKET_CONFIG"
+  log_ok "Shadowrocket 配置已写入：$SHADOWROCKET_CONFIG"
+}
+
+write_mihomo_config() {
+  local username_yaml password_yaml name_yaml
+  username_yaml="$(yaml_double_quote "$AUTH_USER")"
+  password_yaml="$(yaml_double_quote "$AUTH_PASS")"
+  name_yaml="$(yaml_double_quote "naive-${DOMAIN}")"
+  backup_file "$MIHOMO_CONFIG"
+  umask 077
+  cat > "$MIHOMO_CONFIG" <<YAML
+proxies:
+  - name: ${name_yaml}
+    type: http
+    server: ${DOMAIN}
+    port: 443
+    username: ${username_yaml}
+    password: ${password_yaml}
+    tls: true
+    skip-cert-verify: false
+YAML
+  chmod 600 "$MIHOMO_CONFIG"
+  log_ok "Mihomo 配置已写入：$MIHOMO_CONFIG"
+}
+
+write_sing_box_config() {
+  local domain_json user_json pass_json
+  domain_json="$(json_escape "$DOMAIN")"
+  user_json="$(json_escape "$AUTH_USER")"
+  pass_json="$(json_escape "$AUTH_PASS")"
+  backup_file "$SING_BOX_CONFIG"
+  umask 077
+  cat > "$SING_BOX_CONFIG" <<JSON
+{
+  "outbounds": [
+    {
+      "type": "http",
+      "tag": "naive",
+      "server": "${domain_json}",
+      "server_port": 443,
+      "username": "${user_json}",
+      "password": "${pass_json}",
+      "tls": {
+        "enabled": true,
+        "server_name": "${domain_json}"
+      }
+    }
+  ]
+}
+JSON
+  chmod 600 "$SING_BOX_CONFIG"
+  log_ok "sing-box 配置已写入：$SING_BOX_CONFIG"
+}
+
+write_client_outputs() {
+  write_client_config
+  write_node_link_file
+  write_shadowrocket_config
+  write_mihomo_config
+  write_sing_box_config
+}
+
 write_env_file() {
   backup_file "$ENV_FILE"
   umask 077
   cat > "$ENV_FILE" <<ENV
 DOMAIN=${DOMAIN}
+EMAIL=${EMAIL}
 USER=${AUTH_USER}
 PASS=${AUTH_PASS}
 SITE_MODE=${SITE_MODE}
@@ -1604,6 +1946,9 @@ UPSTREAM=${UPSTREAM_BASE}
 REPO=${REPO}
 INSTALL_BIN=${INSTALL_BIN}
 SERVICE_NAME=${SERVICE_NAME}
+CERT_MODE=${CERT_MODE}
+CERT_FULLCHAIN=${CERT_FULLCHAIN}
+CERT_KEY=${CERT_KEY}
 BUILDER_RELEASE_TAG=${DOWNLOADED_RELEASE_TAG}
 BUILDER_RELEASE_SHA256=${DOWNLOADED_ARCHIVE_SHA256}
 RELEASE_SHA256=${DOWNLOADED_ARCHIVE_SHA256}
@@ -1662,13 +2007,35 @@ start_or_reload_service() {
   systemctl enable "$SERVICE_NAME"
   if ! systemctl restart "$SERVICE_NAME"; then
     log_error "启动 ${SERVICE_NAME} 失败。"
+    if restore_caddyfile_backup; then
+      log_warn "正在使用恢复后的 Caddyfile 重新校验并尝试启动。"
+      validate_caddyfile || true
+      systemctl restart "$SERVICE_NAME" >/dev/null 2>&1 || true
+    fi
     log_warn "如果 systemd 状态显示 notify 超时，可编辑 ${SERVICE_FILE} 将 Type=notify 改为 Type=simple，然后执行：systemctl daemon-reload && systemctl restart ${SERVICE_NAME}"
-    systemctl --no-pager --full status "$SERVICE_NAME" || true
-    exit 1
+    die "服务 ${SERVICE_NAME} 启动失败。"
   fi
 
-  systemctl --no-pager --full status "$SERVICE_NAME"
+  systemctl is-active "$SERVICE_NAME" || true
+  systemctl is-enabled "$SERVICE_NAME" || true
   log_ok "服务 ${SERVICE_NAME} 正在运行。"
+}
+
+check_https_after_start() {
+  [[ "$NO_START" -eq 0 ]] || return 0
+  [[ -n "$DOMAIN" ]] || return 0
+
+  if command -v curl >/dev/null 2>&1; then
+    if curl -4I "https://${DOMAIN}" --connect-timeout 5 --max-time 20; then
+      log_ok "HTTPS 已可用：https://${DOMAIN}"
+    else
+      log_warn "HTTPS 检测未通过，请确认 DNS、80/443 放行以及证书状态。"
+    fi
+  fi
+
+  if command -v openssl >/dev/null 2>&1; then
+    openssl s_client -connect "${DOMAIN}:443" -servername "$DOMAIN" </dev/null 2>/dev/null | grep -E 'subject=|issuer=|Verify return code' || true
+  fi
 }
 
 confirm_or_exit() {
@@ -1676,9 +2043,9 @@ confirm_or_exit() {
   local prompt="$2"
   local answer
   printf '%s\n' "$prompt"
-  printf 'Type "%s" to continue: ' "$expected"
+  printf '请输入 "%s" 继续：' "$expected"
   read -r answer
-  [[ "$answer" == "$expected" ]] || die "Cancelled."
+  [[ "$answer" == "$expected" ]] || die "已取消。"
 }
 
 remove_file_with_backup() {
@@ -1699,7 +2066,7 @@ stop_disable_unit_if_present() {
 }
 
 uninstall_service() {
-  confirm_or_exit "uninstall" "This will stop and remove the service units and updater. It will keep /etc/caddy, /var/www/naive and /var/lib/caddy."
+  confirm_or_exit "uninstall" "这将停止并删除服务单元和更新脚本，但保留 /etc/caddy、/var/www/naive 和 /var/lib/caddy。"
 
   stop_disable_unit_if_present "${SERVICE_NAME}.service"
   stop_disable_unit_if_present "caddy.service"
@@ -1715,17 +2082,17 @@ uninstall_service() {
   remove_file_with_backup "$UPDATE_SCRIPT"
 
   systemctl daemon-reload
-  log_ok "Uninstall completed. Config, site and data directories were kept."
+  log_ok "卸载完成。配置、站点和数据目录已保留。"
 }
 
 purge_all() {
   local answer
 
   printf '确认完全卸载？[y/N] '
-  IFS= read -r answer || die "Cancelled."
+  IFS= read -r answer || die "已取消。"
   case "${answer,,}" in
     y|yes) ;;
-    *) die "Cancelled." ;;
+    *) die "已取消。" ;;
   esac
 
   if [[ ! -f "$ENV_FILE" ]]; then
@@ -1733,8 +2100,8 @@ purge_all() {
   fi
 
   printf '请输入 DELETE 确认完全删除：'
-  IFS= read -r answer || die "Cancelled."
-  [[ "$answer" == "DELETE" ]] || die "Cancelled."
+  IFS= read -r answer || die "已取消。"
+  [[ "$answer" == "DELETE" ]] || die "已取消。"
 
   stop_disable_unit_if_present "${SERVICE_NAME}.service"
   stop_disable_unit_if_present "caddy.service"
@@ -1745,8 +2112,8 @@ purge_all() {
   chmod 700 "$BACKUP_DIR" 2>/dev/null || true
   local purge_backup="${BACKUP_DIR}/purge.${TIMESTAMP}.tar.gz"
   if [[ -e "$CONFIG_DIR" || -e "$SITE_DIR" ]]; then
-    tar -czf "$purge_backup" "$CONFIG_DIR" "$SITE_DIR" 2>/dev/null || log_warn "Could not create purge backup archive."
-    [[ -s "$purge_backup" ]] && log_info "Created purge backup: $purge_backup"
+    tar -czf "$purge_backup" "$CONFIG_DIR" "$SITE_DIR" 2>/dev/null || log_warn "无法创建彻底卸载前的备份压缩包。"
+    [[ -s "$purge_backup" ]] && log_info "已创建彻底卸载前备份：$purge_backup"
   fi
 
   remove_file_with_backup "$SERVICE_FILE"
@@ -1762,11 +2129,14 @@ purge_all() {
   fi
   remove_file_with_backup "$CLIENT_CONFIG"
   remove_file_with_backup "$NODE_LINK_FILE"
+  remove_file_with_backup "$SHADOWROCKET_CONFIG"
+  remove_file_with_backup "$MIHOMO_CONFIG"
+  remove_file_with_backup "$SING_BOX_CONFIG"
 
   rm -rf "$CONFIG_DIR" "$SITE_DIR" "$DATA_DIR"
   rm -rf "$BACKUP_DIR"
   systemctl daemon-reload
-  log_ok "Purge completed."
+  log_ok "彻底卸载完成。"
 }
 
 show_current_status() {
@@ -1778,10 +2148,32 @@ show_current_status() {
   认证用户：${AUTH_USER:-未设置}
   回落模式：${SITE_MODE:-未设置}
   反代目标：${UPSTREAM:-未设置}
+  证书模式：${CERT_MODE:-未设置}
+  证书文件：${CERT_FULLCHAIN:-未设置}
+  私钥文件：${CERT_KEY:-未设置}
   Builder 仓库：${REPO}
   Caddy 二进制：${INSTALL_BIN}
   服务名：${SERVICE_NAME}
 STATUS
+
+  if [[ -n "$CERT_FULLCHAIN" ]]; then
+    if [[ -s "$CERT_FULLCHAIN" ]]; then
+      log_ok "证书文件存在：$CERT_FULLCHAIN"
+      if command -v openssl >/dev/null 2>&1; then
+        openssl x509 -in "$CERT_FULLCHAIN" -noout -issuer -enddate -subject || true
+      fi
+    else
+      log_warn "证书文件不存在或为空：$CERT_FULLCHAIN"
+    fi
+  fi
+
+  if [[ -n "$CERT_KEY" ]]; then
+    if [[ -s "$CERT_KEY" ]]; then
+      log_ok "私钥文件存在：$CERT_KEY"
+    else
+      log_warn "私钥文件不存在或为空：$CERT_KEY"
+    fi
+  fi
 
   if [[ -x "$INSTALL_BIN" ]]; then
     "$INSTALL_BIN" version || true
@@ -1846,6 +2238,39 @@ CONFIG
     fi
   fi
 
+  if [[ -f "$SHADOWROCKET_CONFIG" ]]; then
+    found=1
+    if [[ -r "$SHADOWROCKET_CONFIG" ]]; then
+      printf '[INFO] Shadowrocket 配置：%s\n' "$SHADOWROCKET_CONFIG"
+      cat "$SHADOWROCKET_CONFIG"
+      printf '\n'
+    else
+      printf '[WARN] Shadowrocket 配置存在但不可读：%s\n' "$SHADOWROCKET_CONFIG"
+    fi
+  fi
+
+  if [[ -f "$MIHOMO_CONFIG" ]]; then
+    found=1
+    if [[ -r "$MIHOMO_CONFIG" ]]; then
+      printf '[INFO] Mihomo 配置：%s\n' "$MIHOMO_CONFIG"
+      cat "$MIHOMO_CONFIG"
+      printf '\n'
+    else
+      printf '[WARN] Mihomo 配置存在但不可读：%s\n' "$MIHOMO_CONFIG"
+    fi
+  fi
+
+  if [[ -f "$SING_BOX_CONFIG" ]]; then
+    found=1
+    if [[ -r "$SING_BOX_CONFIG" ]]; then
+      printf '[INFO] sing-box 配置：%s\n' "$SING_BOX_CONFIG"
+      cat "$SING_BOX_CONFIG"
+      printf '\n'
+    else
+      printf '[WARN] sing-box 配置存在但不可读：%s\n' "$SING_BOX_CONFIG"
+    fi
+  fi
+
   if [[ -f "$ENV_FILE" && -z "$proxy_url" ]]; then
     found=1
     printf '[WARN] %s 存在，但 DOMAIN/USER/PASS 不完整或不可读。\n' "$ENV_FILE"
@@ -1873,6 +2298,94 @@ show_caddy_logs() {
   else
     printf '[WARN] caddy.service 不存在，可能尚未安装。\n'
   fi
+}
+
+tls_diagnose() {
+  load_saved_install_info
+  refresh_cert_paths
+
+  cat <<INFO
+[INFO] SSL / 证书诊断
+  部署域名：${DOMAIN:-未设置}
+  证书模式：${CERT_MODE:-未设置}
+  证书文件：${CERT_FULLCHAIN:-未设置}
+  私钥文件：${CERT_KEY:-未设置}
+  Caddyfile：${CADDYFILE}
+  服务名：${SERVICE_NAME}
+INFO
+
+  if [[ -z "$DOMAIN" ]]; then
+    log_warn "未读取到 DOMAIN。请先安装或检查 ${ENV_FILE}。"
+    return 0
+  fi
+
+  if getent ahosts "$DOMAIN" >/dev/null 2>&1; then
+    log_ok "DNS 可解析：$DOMAIN"
+    getent ahosts "$DOMAIN" | head -n 5 || true
+  else
+    log_warn "DNS 无法解析：$DOMAIN"
+  fi
+
+  printf '\n[INFO] 端口监听：\n'
+  port_listeners 80 || true
+  port_listeners 443 || true
+
+  if command -v systemctl >/dev/null 2>&1; then
+    printf '\n[INFO] systemd 状态：\n'
+    systemctl is-active "$SERVICE_NAME" || true
+    systemctl is-enabled "$SERVICE_NAME" || true
+  fi
+
+  if [[ -s "$CERT_FULLCHAIN" ]]; then
+    log_ok "证书文件存在：$CERT_FULLCHAIN"
+    if command -v openssl >/dev/null 2>&1; then
+      openssl x509 -in "$CERT_FULLCHAIN" -noout -issuer -enddate -subject || true
+    fi
+  else
+    log_warn "证书文件不存在或为空：$CERT_FULLCHAIN"
+  fi
+
+  if [[ -s "$CERT_KEY" ]]; then
+    log_ok "私钥文件存在：$CERT_KEY"
+  else
+    log_warn "私钥文件不存在或为空：$CERT_KEY"
+  fi
+
+  if command -v curl >/dev/null 2>&1; then
+    printf '\n[INFO] HTTPS 探测：\n'
+    curl -4I "https://${DOMAIN}" --connect-timeout 5 --max-time 20 || true
+  fi
+
+  if command -v openssl >/dev/null 2>&1; then
+    printf '\n[INFO] 远端证书链：\n'
+    openssl s_client -connect "${DOMAIN}:443" -servername "$DOMAIN" </dev/null 2>/dev/null | grep -E 'subject=|issuer=|Verify return code' || true
+  fi
+}
+
+issue_cert_from_saved_config() {
+  require_root
+  require_supported_os
+  require_amd64
+  load_saved_install_info
+  [[ -f "$ENV_FILE" ]] || die "未找到安装信息：$ENV_FILE。请先运行安装 / 重新配置。"
+  [[ -n "$DOMAIN" ]] || die "${ENV_FILE} 中缺少 DOMAIN。"
+  [[ -n "$EMAIL" ]] || die "${ENV_FILE} 中缺少 EMAIL，acme.sh ZeroSSL 注册需要邮箱。"
+  [[ -n "$AUTH_USER" && -n "$AUTH_PASS" ]] || die "${ENV_FILE} 中缺少 USER/PASS。"
+  [[ -x "$INSTALL_BIN" ]] || die "未找到 Caddy 二进制：$INSTALL_BIN。请先运行安装 / 重新配置。"
+
+  validate_domain
+  SITE_MODE="${SITE_MODE:-static}"
+  CERT_MODE="acme-standalone"
+  validate_common_args
+  parse_upstream
+  check_root_free_space
+  install_dependencies
+  ensure_caddy_user_and_dirs
+  issue_local_cert_workflow
+  write_env_file
+  start_or_reload_service
+  check_https_after_start
+  log_ok "本地证书重新申请完成。"
 }
 
 fetch_latest_release_tag() {
@@ -1960,9 +2473,9 @@ toggle_auto_update() {
   if systemctl is-enabled --quiet caddy-naive-update.timer 2>/dev/null || systemctl is-active --quiet caddy-naive-update.timer 2>/dev/null; then
     if prompt_yes_no "自动更新当前已启用，是否关闭？" "N"; then
       systemctl disable --now caddy-naive-update.timer
-      log_ok "Auto-update timer disabled."
+      log_ok "自动更新 timer 已关闭。"
     else
-      log_warn "No changes made."
+      log_warn "未做任何更改。"
     fi
     return 0
   fi
@@ -1972,7 +2485,7 @@ toggle_auto_update() {
     NO_START=0
     write_auto_update_units
   else
-    log_warn "No changes made."
+    log_warn "未做任何更改。"
   fi
 }
 
@@ -2046,12 +2559,17 @@ show_fallback_info() {
   cat <<INFO
 [INFO] 配置位置
   Caddyfile: ${CADDYFILE}
-  Static web root: ${SITE_DIR}
-  Static index: ${SITE_DIR}/index.html
-  Client config: ${CLIENT_CONFIG}
-  Node link: ${NODE_LINK_FILE}
-  Install env: ${ENV_FILE}
-  Updater: ${UPDATE_SCRIPT}
+  静态网页目录: ${SITE_DIR}
+  静态首页文件: ${SITE_DIR}/index.html
+  客户端 JSON 配置: ${CLIENT_CONFIG}
+  节点链接: ${NODE_LINK_FILE}
+  Shadowrocket: ${SHADOWROCKET_CONFIG}
+  Mihomo: ${MIHOMO_CONFIG}
+  sing-box: ${SING_BOX_CONFIG}
+  安装信息: ${ENV_FILE}
+  更新脚本: ${UPDATE_SCRIPT}
+  证书 fullchain: ${CERT_FULLCHAIN:-${CERT_BASE_DIR}/DOMAIN/fullchain.pem}
+  证书私钥: ${CERT_KEY:-${CERT_BASE_DIR}/DOMAIN/privkey.pem}
 INFO
 
   cat <<INFO
@@ -2075,11 +2593,14 @@ INFO
     cat <<INFO
 
 [INFO] 当前安装信息
-  DOMAIN: ${DOMAIN:-not set}
-  SITE_MODE: ${SITE_MODE:-not set}
+  DOMAIN: ${DOMAIN:-未设置}
+  SITE_MODE: ${SITE_MODE:-未设置}
   UPSTREAM: ${UPSTREAM:-未设置}
-  REPO: ${REPO:-not set}
-  INSTALL_BIN: ${INSTALL_BIN:-not set}
+  REPO: ${REPO:-未设置}
+  INSTALL_BIN: ${INSTALL_BIN:-未设置}
+  CERT_MODE: ${CERT_MODE:-未记录}
+  CERT_FULLCHAIN: ${CERT_FULLCHAIN:-未记录}
+  CERT_KEY: ${CERT_KEY:-未记录}
   BUILDER_RELEASE_TAG: ${builder_tag:-未记录}
   BUILDER_RELEASE_SHA256: ${builder_sha:-未记录}
 INFO
@@ -2108,12 +2629,12 @@ INFO
       cat <<INFO
 
 [INFO] 当前使用反代回落。
-  Upstream: ${UPSTREAM:-未设置}
+  反代目标: ${UPSTREAM:-未设置}
 如需修改，建议重新运行菜单 1 重新配置。
 INFO
       ;;
     *)
-      log_warn "未知回落模式：${SITE_MODE:-not set}"
+      log_warn "未知回落模式：${SITE_MODE:-未设置}"
       ;;
   esac
 }
@@ -2135,6 +2656,8 @@ Builder：${BUILDER_GITHUB}
 8. 显示客户端配置
 9. 查看运行日志
 10. 回落网站说明 / 配置位置
+11. SSL / 证书诊断
+12. 重新申请本地证书 acme.sh
 0. 退出
 MENU
 }
@@ -2179,6 +2702,12 @@ run_management_menu() {
       10)
         run_menu_action show_fallback_info
         ;;
+      11)
+        run_menu_action tls_diagnose
+        ;;
+      12)
+        run_menu_action issue_cert_from_saved_config
+        ;;
       0)
         exit 0
         ;;
@@ -2206,6 +2735,15 @@ NaiveProxy 节点链接：
 客户端 JSON 配置：
   ${CLIENT_CONFIG}
 
+Shadowrocket 配置：
+  ${SHADOWROCKET_CONFIG}
+
+Mihomo 配置：
+  ${MIHOMO_CONFIG}
+
+sing-box 配置：
+  ${SING_BOX_CONFIG}
+
 配置内容：
 {
   "listen": "socks://127.0.0.1:1080",
@@ -2220,6 +2758,24 @@ NaiveProxy 节点链接：
   ${ENV_FILE}
   ${CLIENT_CONFIG}
   ${NODE_LINK_FILE}
+  ${SHADOWROCKET_CONFIG}
+  ${MIHOMO_CONFIG}
+  ${SING_BOX_CONFIG}
+
+证书模式：
+  ${CERT_MODE}
+EOF
+
+  if [[ "$CERT_MODE" == "acme-standalone" ]]; then
+    cat <<EOF
+
+本地证书文件：
+  ${CERT_FULLCHAIN}
+  ${CERT_KEY}
+EOF
+  fi
+
+  cat <<EOF
 
 查看状态：
   systemctl status ${SERVICE_NAME}
@@ -2272,18 +2828,39 @@ run_install_flow() {
   download_release_caddy
   install_caddy_binary
   write_static_site
-  write_and_validate_caddyfile
+
+  if [[ "$CERT_MODE" == "acme-standalone" ]]; then
+    if [[ "$NO_START" -eq 1 ]]; then
+      if cert_files_ready; then
+        write_caddyfile_local_cert
+      else
+        log_warn "已指定 --no-start，无法执行 acme.sh standalone 申请证书；将暂时写入 Caddy ZeroSSL 自动证书配置。"
+        write_caddyfile_auto_zerossl
+      fi
+    else
+      write_caddyfile_auto_zerossl
+    fi
+  else
+    write_and_validate_caddyfile "$CERT_MODE"
+  fi
+
   write_systemd_service
   write_update_script
+
+  if [[ "$CERT_MODE" == "acme-standalone" && "$NO_START" -eq 0 ]]; then
+    systemctl daemon-reload
+    issue_local_cert_workflow
+  fi
+
   write_env_file
-  write_client_config
-  write_node_link_file
+  write_client_outputs
 
   if [[ "$AUTO_UPDATE" -eq 1 ]]; then
     write_auto_update_units
   fi
 
   start_or_reload_service
+  check_https_after_start
   print_success
 }
 
@@ -2304,11 +2881,13 @@ main() {
     exit 0
   fi
 
-  if [[ "$ACTION_STATUS" -eq 1 || "$ACTION_CHECK_UPDATE" -eq 1 || "$ACTION_UPDATE" -eq 1 || "$ACTION_FORCE_UPDATE" -eq 1 || "$ACTION_SHOW_CLIENT" -eq 1 || "$ACTION_LOGS" -eq 1 ]]; then
+  if [[ "$ACTION_STATUS" -eq 1 || "$ACTION_CHECK_UPDATE" -eq 1 || "$ACTION_UPDATE" -eq 1 || "$ACTION_FORCE_UPDATE" -eq 1 || "$ACTION_SHOW_CLIENT" -eq 1 || "$ACTION_LOGS" -eq 1 || "$ACTION_ISSUE_CERT" -eq 1 || "$ACTION_TLS_DIAGNOSE" -eq 1 ]]; then
     [[ "$ACTION_STATUS" -eq 1 ]] && show_current_status
     [[ "$ACTION_CHECK_UPDATE" -eq 1 ]] && detect_update
     [[ "$ACTION_UPDATE" -eq 1 ]] && update_caddy_kernel 0
     [[ "$ACTION_FORCE_UPDATE" -eq 1 ]] && update_caddy_kernel 1
+    [[ "$ACTION_ISSUE_CERT" -eq 1 ]] && issue_cert_from_saved_config
+    [[ "$ACTION_TLS_DIAGNOSE" -eq 1 ]] && tls_diagnose
     [[ "$ACTION_SHOW_CLIENT" -eq 1 ]] && show_client_config
     [[ "$ACTION_LOGS" -eq 1 ]] && show_caddy_logs
     exit 0
