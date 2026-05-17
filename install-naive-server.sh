@@ -5,7 +5,7 @@ ASSET_NAME="caddy-naive-linux-amd64.tar.gz"
 SHA_ASSET_NAME="caddy-naive-linux-amd64.tar.gz.sha256"
 
 SCRIPT_NAME="NaiveProxy Server"
-SCRIPT_VERSION="0.2.0"
+SCRIPT_VERSION="1.0.0"
 SCRIPT_AUTHOR="ike-sh"
 SCRIPT_GITHUB="https://github.com/ike-sh/naiveproxy-server"
 BUILDER_REPO_DEFAULT="ike-sh/caddy-naive-builder"
@@ -82,6 +82,38 @@ log_error() { printf '[ERROR] %s\n' "$*" >&2; }
 log_ok() { printf '[OK] %s\n' "$*"; }
 die() { log_error "$*"; exit 1; }
 
+read_tty() {
+  local __var="$1"
+  local __input
+
+  if [[ -t 0 && -r /dev/tty ]]; then
+    IFS= read -r __input </dev/tty || return 1
+  else
+    IFS= read -r __input || return 1
+  fi
+
+  printf -v "$__var" '%s' "$__input"
+}
+
+read_tty_silent() {
+  local __var="$1"
+  local __input
+
+  if [[ -t 0 && -r /dev/tty ]]; then
+    IFS= read -r -s __input </dev/tty || return 1
+  else
+    IFS= read -r -s __input || return 1
+  fi
+
+  printf -v "$__var" '%s' "$__input"
+}
+
+clear_menu_screen() {
+  if [[ -t 1 ]]; then
+    clear 2>/dev/null || printf '\033c'
+  fi
+}
+
 cleanup() {
   if [[ -n "$TMP_DIR" && -d "$TMP_DIR" ]]; then
     rm -rf "$TMP_DIR"
@@ -101,10 +133,9 @@ BANNER
 print_version() {
   cat <<VERSION
 ${SCRIPT_NAME} ${SCRIPT_VERSION}
-作者：${SCRIPT_AUTHOR}
-GitHub：${SCRIPT_GITHUB}
-Builder 仓库：${BUILDER_GITHUB}
-默认 Builder Release：${BUILDER_REPO_DEFAULT}
+Author: ${SCRIPT_AUTHOR}
+GitHub: ${SCRIPT_GITHUB}
+Builder: ${BUILDER_GITHUB}
 VERSION
 }
 
@@ -453,7 +484,7 @@ prompt_text() {
     fi
 
     printf '%s' "$prompt"
-    IFS= read -r input || die "输入已取消。"
+    read_tty input || die "输入已取消。"
     if [[ -z "$input" ]]; then
       value="$current"
     else
@@ -480,7 +511,7 @@ prompt_password() {
       printf '认证密码 PASS [回车自动生成强随机密码]: '
     fi
 
-    IFS= read -r -s first || die "输入已取消。"
+    read_tty_silent first || die "输入已取消。"
     printf '\n'
 
     if [[ -z "$first" ]]; then
@@ -488,7 +519,7 @@ prompt_password() {
     fi
 
     printf '请再次输入认证密码 PASS: '
-    IFS= read -r -s second || die "输入已取消。"
+    read_tty_silent second || die "输入已取消。"
     printf '\n'
 
     if [[ "$first" == "$second" ]]; then
@@ -515,7 +546,7 @@ prompt_site_mode() {
     printf '              注意：第三方网站可能受 CSP、Cookie、跳转、Host 校验和合规影响\n'
     printf '              建议只反代自己有权使用的网站或普通公开静态站\n'
     printf '请选择 [1/2/static/reverse，回车默认 %s]: ' "$default_label"
-    IFS= read -r input || die "输入已取消。"
+    read_tty input || die "输入已取消。"
 
     case "$input" in
       "")
@@ -550,7 +581,7 @@ prompt_cert_mode() {
     printf '     使用 acme.sh + ZeroSSL standalone 先签证书，然后 Caddy 使用本地证书文件，推荐。\n'
     printf '默认：acme-standalone\n'
     printf '请选择 [1/2/3/caddy-auto/caddy-zerossl/acme-standalone，回车默认 %s]: ' "${CERT_MODE:-acme-standalone}"
-    IFS= read -r input || die "输入已取消。"
+    read_tty input || die "输入已取消。"
 
     case "$input" in
       "")
@@ -584,7 +615,7 @@ prompt_http3_mode() {
     printf '  1) off - 关闭 HTTP/3，只使用 HTTP/1.1 + HTTP/2，推荐，最稳\n'
     printf '  2) on  - 开启 HTTP/3，需要 UDP 443 放行，实验功能\n'
     printf '请选择 [1/2/on/off，回车默认 %s]: ' "${HTTP3:-off}"
-    IFS= read -r input || die "输入已取消。"
+    read_tty input || die "输入已取消。"
     case "$input" in
       "")
         [[ "$HTTP3" == "on" || "$HTTP3" == "off" ]] || HTTP3="off"
@@ -618,7 +649,7 @@ prompt_yes_no() {
 
   while true; do
     printf '%s %s ' "$question" "$suffix"
-    IFS= read -r input || die "输入已取消。"
+    read_tty input || die "输入已取消。"
     normalized="${input,,}"
 
     if [[ -z "$normalized" ]]; then
@@ -677,7 +708,7 @@ SUMMARY
 confirm_interactive_install() {
   local answer
   printf '\n确认开始安装？[y/N] '
-  IFS= read -r answer || die "输入已取消。"
+  read_tty answer || die "输入已取消。"
   case "${answer,,}" in
     y|yes)
       return 0
@@ -2135,7 +2166,7 @@ start_or_reload_service() {
       systemctl restart "$SERVICE_NAME" >/dev/null 2>&1 || true
     fi
     log_warn "如果 systemd 状态显示 notify 超时，可编辑 ${SERVICE_FILE} 将 Type=notify 改为 Type=simple，然后执行：systemctl daemon-reload && systemctl restart ${SERVICE_NAME}"
-    die "服务 ${SERVICE_NAME} 启动失败。"
+    return 1
   fi
 
   systemctl is-active "$SERVICE_NAME" || true
@@ -2166,7 +2197,7 @@ confirm_or_exit() {
   local answer
   printf '%s\n' "$prompt"
   printf '请输入 "%s" 继续：' "$expected"
-  read -r answer
+  read_tty answer
   [[ "$answer" == "$expected" ]] || die "已取消。"
 }
 
@@ -2211,7 +2242,7 @@ purge_all() {
   local answer
 
   printf '确认完全卸载？[y/N] '
-  IFS= read -r answer || die "已取消。"
+  read_tty answer || die "已取消。"
   case "${answer,,}" in
     y|yes) ;;
     *) die "已取消。" ;;
@@ -2222,7 +2253,7 @@ purge_all() {
   fi
 
   printf '请输入 DELETE 确认完全删除：'
-  IFS= read -r answer || die "已取消。"
+  read_tty answer || die "已取消。"
   [[ "$answer" == "DELETE" ]] || die "已取消。"
 
   stop_disable_unit_if_present "${SERVICE_NAME}.service"
@@ -2303,6 +2334,7 @@ show_current_status() {
   Builder 仓库：${REPO}
   Caddy 二进制：${INSTALL_BIN}
   服务名：${SERVICE_NAME}
+  更新脚本：${UPDATE_SCRIPT}
 STATUS
 
   if [[ "$HTTP3" == "on" ]]; then
@@ -2364,7 +2396,9 @@ STATUS
 
   if command -v systemctl >/dev/null 2>&1; then
     printf '\n[INFO] systemd 状态：\n'
+    printf '  active: '
     systemctl is-active "$SERVICE_NAME" || true
+    printf '  enabled: '
     systemctl is-enabled "$SERVICE_NAME" || true
     if systemctl is-enabled --quiet caddy-naive-update.timer 2>/dev/null; then
       log_ok "自动更新 timer 已启用。"
@@ -2373,6 +2407,12 @@ STATUS
     fi
   else
     log_warn "当前环境没有 systemctl。"
+  fi
+
+  if [[ -x "$UPDATE_SCRIPT" ]]; then
+    log_ok "更新脚本存在：$UPDATE_SCRIPT"
+  else
+    log_warn "更新脚本不存在或不可执行：$UPDATE_SCRIPT"
   fi
 
   print_port_listen_status
@@ -2528,7 +2568,7 @@ change_auth_user_interactive() {
   printf '当前用户名：%s\n' "$AUTH_USER"
   while true; do
     printf '请输入新用户名：'
-    IFS= read -r new_user || die "输入已取消。"
+    read_tty new_user || die "输入已取消。"
     if [[ -z "$new_user" ]]; then
       log_warn "用户名不能为空。"
       continue
@@ -2553,7 +2593,7 @@ change_auth_pass_interactive() {
     printf '  1) 自动生成强随机密码\n'
     printf '  2) 手动输入新密码\n'
     printf '请选择 [1/2]: '
-    IFS= read -r choice || die "输入已取消。"
+    read_tty choice || die "输入已取消。"
     case "$choice" in
       1)
         AUTH_PASS="$(openssl rand -hex 24)"
@@ -2563,11 +2603,11 @@ change_auth_pass_interactive() {
       2)
         while true; do
           printf '请输入新密码：'
-          IFS= read -r -s first || die "输入已取消。"
+          read_tty_silent first || die "输入已取消。"
           printf '\n'
           [[ -n "$first" ]] || { log_warn "密码不能为空。"; continue; }
           printf '请再次输入新密码：'
-          IFS= read -r -s second || die "输入已取消。"
+          read_tty_silent second || die "输入已取消。"
           printf '\n'
           if [[ "$first" != "$second" ]]; then
             log_warn "两次输入的密码不一致，请重新输入。"
@@ -2615,7 +2655,7 @@ auth_management_menu() {
 0. 返回
 MENU
     printf '请选择：'
-    IFS= read -r choice || return 0
+    read_tty choice || return 0
     case "$choice" in
       1)
         change_auth_user_interactive
@@ -2685,7 +2725,7 @@ HTTP3 开启 / 关闭
 0. 返回
 MENU
   printf '请选择：'
-  IFS= read -r choice || return 0
+  read_tty choice || return 0
   case "$choice" in
     1) set_http3_config "on" ;;
     2) set_http3_config "off" ;;
@@ -2700,7 +2740,7 @@ fix_static_site_permissions_menu() {
   fix_static_site_permissions
   log_ok "静态站权限已修复。"
   if [[ -x "$INSTALL_BIN" && -f "$CADDYFILE" ]]; then
-    validate_caddyfile || true
+    validate_caddyfile || die "Caddyfile 校验失败，未重启服务。"
   fi
   if command -v systemctl >/dev/null 2>&1 && service_exists; then
     systemctl restart "$SERVICE_NAME" || die "重启 ${SERVICE_NAME} 失败。"
@@ -2728,6 +2768,27 @@ INFO
     else
       log_warn "Caddy 服务当前不是 active。"
     fi
+  fi
+
+  if [[ -x "$INSTALL_BIN" ]]; then
+    "$INSTALL_BIN" version || true
+    if "$INSTALL_BIN" list-modules 2>/dev/null | grep -Eiq 'forward_proxy|forwardproxy'; then
+      log_ok "已检测到 forward_proxy 模块。"
+    else
+      log_warn "list-modules 未检测到 forward_proxy 模块。"
+    fi
+  else
+    log_warn "未找到 Caddy 二进制或不可执行：$INSTALL_BIN"
+  fi
+
+  refresh_cert_paths
+  if [[ -s "$CERT_FULLCHAIN" ]]; then
+    log_ok "证书文件存在：$CERT_FULLCHAIN"
+    if command -v openssl >/dev/null 2>&1; then
+      openssl x509 -in "$CERT_FULLCHAIN" -noout -subject -issuer -enddate || true
+    fi
+  else
+    log_warn "证书文件不存在或为空：${CERT_FULLCHAIN:-未设置}"
   fi
 
   if command -v curl >/dev/null 2>&1; then
@@ -2855,6 +2916,7 @@ INFO
 }
 
 issue_cert_from_saved_config() {
+  local env_backup=""
   require_root
   require_supported_os
   require_amd64
@@ -2874,8 +2936,20 @@ issue_cert_from_saved_config() {
   install_dependencies
   ensure_caddy_user_and_dirs
   issue_local_cert_workflow
-  write_env_file
-  start_or_reload_service
+  if ! write_env_file; then
+    log_error "写入 ${ENV_FILE} 失败，正在恢复旧 Caddyfile 和安装信息。"
+    restore_caddyfile_backup || true
+    die "本地证书重新申请失败。"
+  fi
+  env_backup="$LAST_BACKUP_PATH"
+  if ! start_or_reload_service; then
+    if [[ -n "$env_backup" && -f "$env_backup" ]]; then
+      cp -a "$env_backup" "$ENV_FILE"
+      chmod 600 "$ENV_FILE" 2>/dev/null || true
+      log_warn "安装信息已从备份恢复：$env_backup"
+    fi
+    die "本地证书重新申请失败，已尝试恢复原服务。"
+  fi
   check_https_after_start
   log_ok "本地证书重新申请完成。"
 }
@@ -3000,7 +3074,7 @@ menu_manage_auto_update() {
 pause_for_menu() {
   local _
   printf '\n按 Enter 返回菜单...'
-  IFS= read -r _ || true
+  read_tty _ || true
 }
 
 run_menu_action() {
@@ -3051,12 +3125,13 @@ show_fallback_info() {
   cat <<INFO
 [INFO] 配置位置
   Caddyfile: ${CADDYFILE}
-  静态网页目录: ${SITE_DIR}
-  静态首页文件: ${SITE_DIR}/index.html
-  安装信息: ${ENV_FILE}
-  更新脚本: ${UPDATE_SCRIPT}
-  证书 fullchain: ${CERT_FULLCHAIN:-${CERT_BASE_DIR}/DOMAIN/fullchain.pem}
-  证书私钥: ${CERT_KEY:-${CERT_BASE_DIR}/DOMAIN/privkey.pem}
+  Install env: ${ENV_FILE}
+  Static web root: ${SITE_DIR}
+  Static index: ${SITE_DIR}/index.html
+  Cert dir: ${CERT_BASE_DIR}/${DOMAIN:-DOMAIN}
+  Updater: ${UPDATE_SCRIPT}
+  Cert fullchain: ${CERT_FULLCHAIN:-${CERT_BASE_DIR}/DOMAIN/fullchain.pem}
+  Cert key: ${CERT_KEY:-${CERT_BASE_DIR}/DOMAIN/privkey.pem}
 INFO
 
   cat <<INFO
@@ -3131,9 +3206,6 @@ INFO
 print_management_menu() {
   cat <<MENU
 ${SCRIPT_NAME} 管理菜单
-作者：${SCRIPT_AUTHOR}
-GitHub：${SCRIPT_GITHUB}
-Builder：${BUILDER_GITHUB}
 -------------------------------------------------
 1. 一键安装 / 重新配置
 2. 查看当前状态
@@ -3159,10 +3231,11 @@ run_management_menu() {
   local choice
 
   while true; do
+    clear_menu_screen
     printf '\n'
     print_management_menu
     printf '\n请选择：'
-    IFS= read -r choice || exit 0
+    read_tty choice || exit 0
     choice="${choice//$'\r'/}"
 
     case "$choice" in
@@ -3232,6 +3305,7 @@ print_success() {
 
 run_install_flow() {
   local issue_needed=0
+  local env_backup=""
   require_root
   require_supported_os
   require_amd64
@@ -3250,11 +3324,11 @@ run_install_flow() {
 
   if [[ "$CERT_MODE" == "acme-standalone" ]]; then
     if [[ "$NO_START" -eq 1 ]]; then
-      if cert_exists; then
-        write_caddyfile_local_cert
-      else
+      if should_issue_cert; then
         log_warn "已指定 --no-start，无法执行 acme.sh standalone 申请证书；将暂时写入 Caddy ZeroSSL 自动证书配置。"
         write_caddyfile_auto_zerossl
+      else
+        write_caddyfile_local_cert
       fi
     else
       if should_issue_cert; then
@@ -3276,13 +3350,25 @@ run_install_flow() {
     issue_local_cert_workflow
   fi
 
-  write_env_file
+  if ! write_env_file; then
+    log_error "写入 ${ENV_FILE} 失败，正在恢复旧 Caddyfile。"
+    restore_caddyfile_backup || true
+    die "安装信息写入失败。"
+  fi
+  env_backup="$LAST_BACKUP_PATH"
 
   if [[ "$AUTO_UPDATE" -eq 1 ]]; then
     write_auto_update_units
   fi
 
-  start_or_reload_service
+  if ! start_or_reload_service; then
+    if [[ -n "$env_backup" && -f "$env_backup" ]]; then
+      cp -a "$env_backup" "$ENV_FILE"
+      chmod 600 "$ENV_FILE" 2>/dev/null || true
+      log_warn "安装信息已从备份恢复：$env_backup"
+    fi
+    die "安装 / 重新配置失败，已尝试恢复原服务。"
+  fi
   check_https_after_start
   print_success
 }
