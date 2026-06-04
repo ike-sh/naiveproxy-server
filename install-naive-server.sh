@@ -1,11 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ASSET_NAME="caddy-naive-linux-amd64.tar.gz"
-SHA_ASSET_NAME="caddy-naive-linux-amd64.tar.gz.sha256"
-
 SCRIPT_NAME="NaiveProxy Server"
-SCRIPT_VERSION="1.0.0"
+SCRIPT_VERSION="1.0.1"
 SCRIPT_AUTHOR="ike-sh"
 SCRIPT_GITHUB="https://github.com/ike-sh/naiveproxy-server"
 BUILDER_REPO_DEFAULT="ike-sh/caddy-naive-builder"
@@ -39,6 +36,10 @@ REPO="$DEFAULT_REPO"
 INSTALL_BIN="$DEFAULT_INSTALL_BIN"
 SERVICE_NAME="$DEFAULT_SERVICE_NAME"
 SERVICE_FILE="/etc/systemd/system/${DEFAULT_SERVICE_NAME}.service"
+DETECTED_UNAME_M=""
+TARGET_ARCH=""
+ASSET_NAME=""
+SHA_ASSET_NAME=""
 CERT_MODE="acme-standalone"
 CERT_FULLCHAIN=""
 CERT_KEY=""
@@ -63,6 +64,7 @@ ACTION_HTTP3_TOGGLE=0
 ACTION_PROBE_TOGGLE=0
 ACTION_PROXY_SELF_TEST=0
 ACTION_FIX_STATIC_PERMS=0
+ACTION_TEST_ARCH=0
 SET_USER_VALUE=""
 SET_PASS_VALUE=""
 DO_UNINSTALL=0
@@ -73,7 +75,8 @@ TMP_DIR=""
 DOWNLOADED_CADDY=""
 DOWNLOADED_ARCHIVE_SHA256=""
 DOWNLOADED_RELEASE_TAG=""
-DOWNLOADED_RELEASE_URL=""
+RECORDED_BUILDER_RELEASE_ARCH=""
+RECORDED_BUILDER_RELEASE_ASSET=""
 LAST_CADDYFILE_BACKUP_FOR_RESTORE=""
 
 log_info() { printf '[INFO] %s\n' "$*"; }
@@ -411,6 +414,9 @@ parse_args() {
         ;;
       --force-update)
         ACTION_FORCE_UPDATE=1
+        ;;
+      --test-arch)
+        ACTION_TEST_ARCH=1
         ;;
       --issue-cert)
         ACTION_ISSUE_CERT=1
@@ -786,18 +792,42 @@ require_supported_os() {
   command -v apt-get >/dev/null 2>&1 || die "需要 apt-get，但当前系统未找到。"
 }
 
-require_amd64() {
+detect_arch() {
   local arch
-  arch="$(uname -m)"
+  if [[ -n "${NAIVE_TEST_UNAME_M:-}" ]]; then
+    arch="$NAIVE_TEST_UNAME_M"
+  else
+    arch="$(uname -m)"
+  fi
+
+  DETECTED_UNAME_M="$arch"
   case "$arch" in
-    x86_64|amd64) ;;
+    x86_64|amd64)
+      TARGET_ARCH="linux-amd64"
+      ;;
     aarch64|arm64)
-      die "当前 Release 只提供 linux-amd64，请不要继续安装。"
+      TARGET_ARCH="linux-arm64"
       ;;
     *)
-      die "不支持的架构：${arch}。当前仅支持 linux-amd64。"
+      die "不支持的架构：${arch}。支持的架构：linux-amd64 / linux-arm64。"
       ;;
   esac
+}
+
+set_builder_assets() {
+  [[ -n "$TARGET_ARCH" ]] || detect_arch
+  ASSET_NAME="caddy-naive-${TARGET_ARCH}.tar.gz"
+  SHA_ASSET_NAME="${ASSET_NAME}.sha256"
+}
+
+prepare_builder_assets() {
+  detect_arch
+  set_builder_assets
+}
+
+print_test_arch() {
+  prepare_builder_assets
+  printf '%s -> %s -> %s\n' "$DETECTED_UNAME_M" "$TARGET_ARCH" "$ASSET_NAME"
 }
 
 print_disk_cleanup_hint() {
@@ -977,9 +1007,12 @@ load_saved_install_info() {
   [[ -n "$value" ]] && PROBE_RESISTANCE="$value"
   value="$(read_env_value BUILDER_RELEASE_TAG || true)"
   [[ -n "$value" ]] && DOWNLOADED_RELEASE_TAG="$value"
+  value="$(read_env_value BUILDER_RELEASE_ARCH || true)"
+  [[ -n "$value" ]] && RECORDED_BUILDER_RELEASE_ARCH="$value"
+  value="$(read_env_value BUILDER_RELEASE_ASSET || true)"
+  [[ -n "$value" ]] && RECORDED_BUILDER_RELEASE_ASSET="$value"
   value="$(read_env_value BUILDER_RELEASE_SHA256 || true)"
   [[ -n "$value" ]] && DOWNLOADED_ARCHIVE_SHA256="$value"
-
   refresh_paths
   if [[ -n "$DOMAIN" && ( -z "$CERT_FULLCHAIN" || -z "$CERT_KEY" ) ]]; then
     refresh_cert_paths
@@ -1180,7 +1213,23 @@ verify_sha256() {
   log_ok "SHA256 校验通过。"
 }
 
+download_release_asset() {
+  local url="$1"
+  local output="$2"
+  local asset="$3"
+
+  if curl -fL --retry 3 --connect-timeout 20 -o "$output" "$url"; then
+    return 0
+  fi
+
+  if [[ "$TARGET_ARCH" == "linux-arm64" ]]; then
+    die "当前 Release 缺少 ${asset}，请先确认 caddy-naive-builder 最新 Release 已发布 arm64 资产。"
+  fi
+  die "下载 Release 资产失败：${asset}"
+}
+
 download_release_caddy() {
+  prepare_builder_assets
   check_root_free_space
   TMP_DIR="$(mktemp -d)"
   local archive_url sha_url extract_dir caddy_path
@@ -1188,12 +1237,10 @@ download_release_caddy() {
   DOWNLOADED_RELEASE_TAG="${DOWNLOADED_RELEASE_TAG##*/}"
   archive_url="https://github.com/${REPO}/releases/latest/download/${ASSET_NAME}"
   sha_url="https://github.com/${REPO}/releases/latest/download/${SHA_ASSET_NAME}"
-  DOWNLOADED_RELEASE_URL="https://github.com/${REPO}/releases/latest"
-
   log_info "正在下载 $archive_url"
-  curl -fL --retry 3 --connect-timeout 20 -o "${TMP_DIR}/${ASSET_NAME}" "$archive_url"
+  download_release_asset "$archive_url" "${TMP_DIR}/${ASSET_NAME}" "$ASSET_NAME"
   log_info "正在下载 $sha_url"
-  curl -fL --retry 3 --connect-timeout 20 -o "${TMP_DIR}/${SHA_ASSET_NAME}" "$sha_url"
+  download_release_asset "$sha_url" "${TMP_DIR}/${SHA_ASSET_NAME}" "$SHA_ASSET_NAME"
 
   verify_sha256 "$TMP_DIR"
 
@@ -1760,11 +1807,13 @@ write_update_script() {
     printf 'DEFAULT_INSTALL_BIN=%q\n' "$INSTALL_BIN"
     printf 'DEFAULT_SERVICE_NAME=%q\n' "$SERVICE_NAME"
     cat <<'UPDATE_BODY'
-ASSET_NAME="caddy-naive-linux-amd64.tar.gz"
-SHA_ASSET_NAME="caddy-naive-linux-amd64.tar.gz.sha256"
 BACKUP_DIR="/var/backups/caddy-naive"
 CADDYFILE="/etc/caddy/Caddyfile"
 ENV_FILE="/etc/caddy/naive.env"
+DETECTED_UNAME_M=""
+TARGET_ARCH=""
+ASSET_NAME=""
+SHA_ASSET_NAME=""
 
 log_info() { printf '[INFO] %s\n' "$*"; }
 log_warn() { printf '[WARN] %s\n' "$*" >&2; }
@@ -1788,18 +1837,43 @@ require_root() {
   [[ "${EUID}" -eq 0 ]] || die "更新脚本必须使用 root 权限运行。"
 }
 
-require_amd64() {
+detect_arch() {
   local arch
-  arch="$(uname -m)"
+
+  if [[ -n "${NAIVE_TEST_UNAME_M:-}" ]]; then
+    arch="$NAIVE_TEST_UNAME_M"
+  else
+    arch="$(uname -m)"
+  fi
+
+  DETECTED_UNAME_M="$arch"
   case "$arch" in
-    x86_64|amd64) ;;
+    x86_64|amd64)
+      TARGET_ARCH="linux-amd64"
+      ;;
     aarch64|arm64)
-      die "当前 Release 只提供 linux-amd64，请不要继续安装。"
+      TARGET_ARCH="linux-arm64"
       ;;
     *)
-      die "不支持的架构：${arch}。当前仅支持 linux-amd64。"
+      die "不支持的架构：${arch}。支持的架构：linux-amd64 / linux-arm64。"
       ;;
   esac
+}
+
+set_builder_assets() {
+  [[ -n "$TARGET_ARCH" ]] || detect_arch
+  ASSET_NAME="caddy-naive-${TARGET_ARCH}.tar.gz"
+  SHA_ASSET_NAME="${ASSET_NAME}.sha256"
+}
+
+prepare_builder_assets() {
+  detect_arch
+  set_builder_assets
+}
+
+print_test_arch() {
+  prepare_builder_assets
+  printf '%s -> %s -> %s\n' "$DETECTED_UNAME_M" "$TARGET_ARCH" "$ASSET_NAME"
 }
 
 print_disk_cleanup_hint() {
@@ -1914,7 +1988,23 @@ verify_sha256() {
   log_ok "SHA256 校验通过。"
 }
 
+download_release_asset() {
+  local url="$1"
+  local output="$2"
+  local asset="$3"
+
+  if curl -fL --retry 3 --connect-timeout 20 -o "$output" "$url"; then
+    return 0
+  fi
+
+  if [[ "$TARGET_ARCH" == "linux-arm64" ]]; then
+    die "当前 Release 缺少 ${asset}，请先确认 caddy-naive-builder 最新 Release 已发布 arm64 资产。"
+  fi
+  die "下载 Release 资产失败：${asset}"
+}
+
 download_release_caddy() {
+  prepare_builder_assets
   check_root_free_space
   TMP_DIR="$(mktemp -d)"
   local archive_url sha_url extract_dir caddy_path
@@ -1922,11 +2012,10 @@ download_release_caddy() {
   DOWNLOADED_RELEASE_TAG="${DOWNLOADED_RELEASE_TAG##*/}"
   archive_url="https://github.com/${REPO}/releases/latest/download/${ASSET_NAME}"
   sha_url="https://github.com/${REPO}/releases/latest/download/${SHA_ASSET_NAME}"
-
   log_info "正在下载 $archive_url"
-  curl -fL --retry 3 --connect-timeout 20 -o "${TMP_DIR}/${ASSET_NAME}" "$archive_url"
+  download_release_asset "$archive_url" "${TMP_DIR}/${ASSET_NAME}" "$ASSET_NAME"
   log_info "正在下载 $sha_url"
-  curl -fL --retry 3 --connect-timeout 20 -o "${TMP_DIR}/${SHA_ASSET_NAME}" "$sha_url"
+  download_release_asset "$sha_url" "${TMP_DIR}/${SHA_ASSET_NAME}" "$SHA_ASSET_NAME"
 
   verify_sha256 "$TMP_DIR"
 
@@ -2013,10 +2102,20 @@ update_env_release_sha() {
   local tmp_file
   tmp_file="$(mktemp)"
   awk -F= '
-    BEGIN { tag_done=0; builder_sha_done=0; url_done=0; updated_done=0 }
+    BEGIN { tag_done=0; arch_done=0; asset_done=0; builder_sha_done=0; url_done=0; updated_done=0 }
     $1 == "BUILDER_RELEASE_TAG" {
       print "BUILDER_RELEASE_TAG='"${DOWNLOADED_RELEASE_TAG}"'";
       tag_done=1;
+      next
+    }
+    $1 == "BUILDER_RELEASE_ARCH" {
+      print "BUILDER_RELEASE_ARCH='"${TARGET_ARCH}"'";
+      arch_done=1;
+      next
+    }
+    $1 == "BUILDER_RELEASE_ASSET" {
+      print "BUILDER_RELEASE_ASSET='"${ASSET_NAME}"'";
+      asset_done=1;
       next
     }
     $1 == "BUILDER_RELEASE_SHA256" {
@@ -2025,7 +2124,7 @@ update_env_release_sha() {
       next
     }
     $1 == "BUILDER_RELEASE_URL" {
-      print "BUILDER_RELEASE_URL=https://github.com/'"${REPO}"'/releases/latest";
+      print "BUILDER_RELEASE_URL=https://github.com/'"${REPO}"'/releases/latest/download/'"${ASSET_NAME}"'";
       url_done=1;
       next
     }
@@ -2037,8 +2136,10 @@ update_env_release_sha() {
     { print }
     END {
       if (!tag_done) print "BUILDER_RELEASE_TAG='"${DOWNLOADED_RELEASE_TAG}"'";
+      if (!arch_done) print "BUILDER_RELEASE_ARCH='"${TARGET_ARCH}"'";
+      if (!asset_done) print "BUILDER_RELEASE_ASSET='"${ASSET_NAME}"'";
       if (!builder_sha_done) print "BUILDER_RELEASE_SHA256='"${DOWNLOADED_ARCHIVE_SHA256}"'";
-      if (!url_done) print "BUILDER_RELEASE_URL=https://github.com/'"${REPO}"'/releases/latest";
+      if (!url_done) print "BUILDER_RELEASE_URL=https://github.com/'"${REPO}"'/releases/latest/download/'"${ASSET_NAME}"'";
       if (!updated_done) print "UPDATED_AT='"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'";
     }
   ' "$ENV_FILE" > "$tmp_file"
@@ -2049,8 +2150,8 @@ update_env_release_sha() {
 
 main() {
   require_root
-  require_amd64
   load_env_defaults
+  prepare_builder_assets
   require_command curl
   require_command tar
   require_command sha256sum
@@ -2097,8 +2198,10 @@ CERT_KEY=${CERT_KEY}
 HTTP3=${HTTP3}
 PROBE_RESISTANCE=${PROBE_RESISTANCE}
 BUILDER_RELEASE_TAG=${DOWNLOADED_RELEASE_TAG}
+BUILDER_RELEASE_ARCH=${TARGET_ARCH}
+BUILDER_RELEASE_ASSET=${ASSET_NAME}
 BUILDER_RELEASE_SHA256=${DOWNLOADED_ARCHIVE_SHA256}
-BUILDER_RELEASE_URL=${DOWNLOADED_RELEASE_URL:-https://github.com/${REPO}/releases/latest}
+BUILDER_RELEASE_URL=https://github.com/${REPO}/releases/latest/download/${ASSET_NAME}
 RELEASE_SHA256=${DOWNLOADED_ARCHIVE_SHA256}
 INSTALLED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 ENV
@@ -2318,7 +2421,12 @@ print_port_listen_status() {
 }
 
 show_current_status() {
+  local release_arch release_asset release_sha
   load_saved_install_info
+  prepare_builder_assets
+  release_arch="${RECORDED_BUILDER_RELEASE_ARCH:-$TARGET_ARCH}"
+  release_asset="${RECORDED_BUILDER_RELEASE_ASSET:-$ASSET_NAME}"
+  release_sha="${DOWNLOADED_ARCHIVE_SHA256:-$(read_env_value RELEASE_SHA256 || true)}"
 
   cat <<STATUS
 [INFO] 当前配置
@@ -2332,6 +2440,10 @@ show_current_status() {
   证书文件：${CERT_FULLCHAIN:-未设置}
   私钥文件：${CERT_KEY:-未设置}
   Builder 仓库：${REPO}
+  当前系统架构：${DETECTED_UNAME_M}
+  当前 Release 架构：${release_arch}
+  当前 Release asset：${release_asset}
+  当前 Caddy naive sha256：${release_sha:-未记录}
   Caddy 二进制：${INSTALL_BIN}
   服务名：${SERVICE_NAME}
   更新脚本：${UPDATE_SCRIPT}
@@ -2919,7 +3031,7 @@ issue_cert_from_saved_config() {
   local env_backup=""
   require_root
   require_supported_os
-  require_amd64
+  prepare_builder_assets
   load_saved_install_info
   [[ -f "$ENV_FILE" ]] || die "未找到安装信息：$ENV_FILE。请先运行安装 / 重新配置。"
   [[ -n "$DOMAIN" ]] || die "${ENV_FILE} 中缺少 DOMAIN。"
@@ -2961,11 +3073,13 @@ fetch_latest_release_tag() {
 }
 
 fetch_latest_archive_sha() {
+  [[ -n "$SHA_ASSET_NAME" ]] || prepare_builder_assets
   curl -fsSL "https://github.com/${REPO}/releases/latest/download/${SHA_ASSET_NAME}" | awk '{print $1; exit}'
 }
 
 detect_update() {
   load_saved_install_info
+  prepare_builder_assets
   if ! command -v curl >/dev/null 2>&1; then
     log_warn "检测更新需要 curl。"
     return 0
@@ -2983,7 +3097,7 @@ detect_update() {
   legacy_sha="$(read_env_value RELEASE_SHA256 || true)"
   [[ -n "$current_sha" ]] || current_sha="$legacy_sha"
 
-  [[ -n "$latest_sha" ]] || die "无法获取 ${REPO} 的最新 Release 校验值。"
+  [[ -n "$latest_sha" ]] || die "无法获取 ${REPO} 的最新 Release 校验值：${SHA_ASSET_NAME}。"
 
   if [[ -x "$INSTALL_BIN" ]]; then
     current_version="$("$INSTALL_BIN" version 2>&1 || true)"
@@ -2994,6 +3108,9 @@ detect_update() {
   cat <<STATUS
 [INFO] 更新检测
   Builder 仓库：${REPO}
+  当前系统架构：${DETECTED_UNAME_M}
+  当前检测架构：${TARGET_ARCH}
+  当前检测资产：${ASSET_NAME}
   已记录 Builder Release Tag：${current_tag:-未记录}
   最新 Release：${latest_tag:-未知}
   当前 Caddy：${current_version}
@@ -3012,17 +3129,21 @@ update_caddy_kernel() {
   local force="${1:-0}"
   require_root
   load_saved_install_info
+  prepare_builder_assets
+  write_update_script
   [[ -x "$UPDATE_SCRIPT" ]] || die "未找到更新脚本：$UPDATE_SCRIPT。请先运行安装 / 重新配置。"
   if [[ "$force" -eq 1 ]]; then
-    log_info "正在从 ${REPO} 强制重新安装 latest Caddy naive 内核。"
+    log_info "正在从 ${REPO} 强制重新安装 latest Caddy naive 内核：${ASSET_NAME}。"
+  else
+    log_info "正在从 ${REPO} 更新 Caddy naive 内核：${ASSET_NAME}。"
   fi
   "$UPDATE_SCRIPT"
 }
 
 menu_update_caddy_kernel() {
   load_saved_install_info
-  if [[ ! -f "$ENV_FILE" || ! -x "$INSTALL_BIN" || ! -x "$UPDATE_SCRIPT" ]]; then
-    printf '[WARN] 当前尚未安装或更新脚本不存在。\n'
+  if [[ ! -f "$ENV_FILE" || ! -x "$INSTALL_BIN" ]]; then
+    printf '[WARN] 当前尚未安装完整 NaiveProxy Server。\n'
     printf '[INFO] 请先选择 1. 一键安装 / 重新配置。\n'
     printf '[INFO] 如果只是想查看 GitHub 最新版本，请选择 3. 检测更新。\n'
     return 0
@@ -3117,9 +3238,11 @@ menu_purge_all() {
 }
 
 show_fallback_info() {
-  local builder_tag builder_sha installed=0
+  local builder_tag builder_arch builder_asset builder_sha installed=0
   load_saved_install_info
   builder_tag="$(read_env_value BUILDER_RELEASE_TAG || true)"
+  builder_arch="$(read_env_value BUILDER_RELEASE_ARCH || true)"
+  builder_asset="$(read_env_value BUILDER_RELEASE_ASSET || true)"
   builder_sha="$(read_env_value BUILDER_RELEASE_SHA256 || true)"
 
   cat <<INFO
@@ -3166,6 +3289,8 @@ INFO
   CERT_FULLCHAIN: ${CERT_FULLCHAIN:-未记录}
   CERT_KEY: ${CERT_KEY:-未记录}
   BUILDER_RELEASE_TAG: ${builder_tag:-未记录}
+  BUILDER_RELEASE_ARCH: ${builder_arch:-未记录}
+  BUILDER_RELEASE_ASSET: ${builder_asset:-未记录}
   BUILDER_RELEASE_SHA256: ${builder_sha:-未记录}
 INFO
   fi
@@ -3308,7 +3433,7 @@ run_install_flow() {
   local env_backup=""
   require_root
   require_supported_os
-  require_amd64
+  prepare_builder_assets
   validate_domain
   validate_common_args
   parse_upstream
@@ -3375,6 +3500,11 @@ run_install_flow() {
 
 main() {
   parse_args "$@"
+
+  if [[ "$ACTION_TEST_ARCH" -eq 1 ]]; then
+    print_test_arch
+    exit 0
+  fi
 
   if [[ "$DO_PURGE" -eq 1 ]]; then
     require_root

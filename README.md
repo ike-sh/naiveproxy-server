@@ -1,15 +1,22 @@
-# NaiveProxy Server 1.0.0 稳定版
+# NaiveProxy Server 1.0.1 稳定版
 
 作者：ike-sh  
 GitHub：https://github.com/ike-sh/naiveproxy-server  
 Builder 仓库：https://github.com/ike-sh/caddy-naive-builder
 
-这是一个面向 Debian/Ubuntu `linux-amd64` 服务器的 NaiveProxy 服务端一键管理脚本。脚本直接下载 Builder Release 里的 Caddy naive 二进制，不安装 Go，不安装 xcaddy，也不在服务器本地编译 Caddy。
+这是一个面向 Debian/Ubuntu `linux-amd64` / `linux-arm64` 服务器的 NaiveProxy 服务端一键管理脚本。脚本会根据 `uname -m` 自动选择 Builder Release 里的 Caddy naive 二进制，不安装 Go，不安装 xcaddy，也不在服务器本地编译 Caddy。
 
-Release 资产名称固定为：
+当前支持的 Release 资产：
 
 - `caddy-naive-linux-amd64.tar.gz`
 - `caddy-naive-linux-amd64.tar.gz.sha256`
+- `caddy-naive-linux-arm64.tar.gz`
+- `caddy-naive-linux-arm64.tar.gz.sha256`
+
+架构映射：
+
+- `x86_64` / `amd64` -> `linux-amd64`
+- `aarch64` / `arm64` -> `linux-arm64`
 
 ## 推荐安装
 
@@ -349,11 +356,13 @@ bash install-naive-server.sh --force-update
 它不会重写整份 `/etc/caddy/naive.env` 或改变服务端账号、证书、站点模式等业务配置。更新成功后只会刷新 `naive.env` 中的：
 
 - `BUILDER_RELEASE_TAG`
+- `BUILDER_RELEASE_ARCH`
+- `BUILDER_RELEASE_ASSET`
 - `BUILDER_RELEASE_SHA256`
 - `BUILDER_RELEASE_URL`
 - `UPDATED_AT`
 
-检测更新不会只比较 `caddy version`。脚本会比较 Builder Release tag 和 latest 资产 sha256；即使 Caddy 版本号不变，只要 Builder Release 产物更新，也能检测到。
+检测更新不会只比较 `caddy version`。脚本会根据当前 `uname -m` 选择对应资产，比较 Builder Release tag 和 latest 资产 sha256；即使 Caddy 版本号不变，只要 Builder Release 产物更新，也能检测到。
 
 ## 卸载
 
@@ -401,7 +410,14 @@ Caddyfile validate 失败：
 Release 下载失败：
 
 - 检查服务器是否可以访问 GitHub。
-- 检查 Builder 仓库是否存在固定资产名。
+- 检查 Builder 仓库是否存在当前架构对应资产名。
+
+arm64 下载 404：
+
+- 先检查 https://github.com/ike-sh/caddy-naive-builder/releases/latest
+- 确认是否存在 `caddy-naive-linux-arm64.tar.gz`。
+- 确认是否存在 `caddy-naive-linux-arm64.tar.gz.sha256`。
+- 如果不存在，需要先触发 caddy-naive-builder 的 GitHub Actions `force_rebuild`。
 
 磁盘不足：
 
@@ -414,8 +430,8 @@ journalctl --vacuum-size=100M
 
 ## 限制
 
-- 仅支持 `linux-amd64`。
-- `arm64/aarch64` 会明确报错退出。
+- 支持 `linux-amd64` 和 `linux-arm64`。
+- 其他架构会明确报错退出，并显示检测到的 `uname -m`。
 - 不安装 Go，不安装 xcaddy，不在服务器本地编译 Caddy。
 - 不关闭系统防火墙。
 - 不自动修改 nginx/apache。
