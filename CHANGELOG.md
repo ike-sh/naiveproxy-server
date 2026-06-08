@@ -4,6 +4,15 @@ All notable changes to [naiveproxy-server](https://github.com/ike-sh/naiveproxy-
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.6] - 2026-06-08
+
+### Fixed
+
+- 删除 `install-naive-server.sh` 内重复的客户端链接函数，统一使用 `lib/links.sh`
+- `caddyfile_has_recommended_site` 校验所有绑定域名（含 `EXTRA_DOMAINS`）
+- `vps-verify-checklist.sh` 从 `naive.env` 读取 `SERVICE_NAME`，不再硬编码 `caddy`
+- `--extra-auth` 拒绝用户名含冒号
+
 ## [1.0.5] - 2026-06-08
 
 ### Fixed
@@ -103,6 +112,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - 代理核心自检、SSL 诊断、认证管理
 - HTTP3 开关、probe_resistance 控制
 
+[1.0.6]: https://github.com/ike-sh/naiveproxy-server/compare/v1.0.5...v1.0.6
 [1.0.5]: https://github.com/ike-sh/naiveproxy-server/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/ike-sh/naiveproxy-server/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/ike-sh/naiveproxy-server/compare/v1.0.2...v1.0.3

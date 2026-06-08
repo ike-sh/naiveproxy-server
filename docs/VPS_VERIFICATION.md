@@ -3,12 +3,12 @@
 [![CI](https://github.com/ike-sh/naiveproxy-server/actions/workflows/ci.yml/badge.svg)](https://github.com/ike-sh/naiveproxy-server/actions/workflows/ci.yml)
 [![Latest Release](https://img.shields.io/github/v/release/ike-sh/naiveproxy-server?label=stable)](https://github.com/ike-sh/naiveproxy-server/releases/latest)
 
-> 当前推荐版本：**[v1.0.5](https://github.com/ike-sh/naiveproxy-server/releases/tag/v1.0.5)** · 适用全新 Debian/Ubuntu VPS
+> 当前推荐版本：**[v1.0.6](https://github.com/ike-sh/naiveproxy-server/releases/tag/v1.0.6)** · 适用全新 Debian/Ubuntu VPS
 
 ## 安装命令
 
 ```bash
-curl -fsSL https://github.com/ike-sh/naiveproxy-server/releases/download/v1.0.5/install-naive-server.sh | sudo bash -s -- \
+curl -fsSL https://github.com/ike-sh/naiveproxy-server/releases/download/v1.0.6/install-naive-server.sh | sudo bash -s -- \
   --domain YOUR_DOMAIN \
   --email YOUR_EMAIL \
   --site-mode static \
@@ -114,6 +114,6 @@ curl -4I https://YOUR_DOMAIN
 | 能测延迟不能上网 | 确认 UDP over TCP 已开启 |
 | 证书失败 | `--tls-diagnose`，检查 DNS / TCP 80 / Cloudflare 灰云 |
 | 结构警告 | 菜单 `1. 一键安装 / 重新配置` |
-| env 密码含特殊字符乱码 | 升级至 v1.0.5+（`%q` 读写修复） |
+| env 密码含特殊字符乱码 | 升级至 v1.0.6+（`%q` 读写修复） |
 
 **10 项全部通过 = 部署验证合格**

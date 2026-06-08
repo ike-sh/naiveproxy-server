@@ -5,7 +5,7 @@
 [![Latest Release](https://img.shields.io/github/v/release/ike-sh/naiveproxy-server?label=stable)](https://github.com/ike-sh/naiveproxy-server/releases/latest)
 
 > 仓库：[https://github.com/ike-sh/naiveproxy-server](https://github.com/ike-sh/naiveproxy-server)  
-> 当前推荐版本：**[v1.0.5](https://github.com/ike-sh/naiveproxy-server/releases/tag/v1.0.5)** · [CHANGELOG](CHANGELOG.md) · [架构说明](docs/ARCHITECTURE.md)
+> 当前推荐版本：**[v1.0.6](https://github.com/ike-sh/naiveproxy-server/releases/tag/v1.0.6)** · [CHANGELOG](CHANGELOG.md) · [架构说明](docs/ARCHITECTURE.md)
 
 ## 前置条件
 
@@ -20,16 +20,16 @@
 
 ## 快速部署（推荐）
 
-安装包直链（当前稳定版 [v1.0.5](https://github.com/ike-sh/naiveproxy-server/releases/tag/v1.0.5)）：
+安装包直链（当前稳定版 [v1.0.6](https://github.com/ike-sh/naiveproxy-server/releases/tag/v1.0.6)）：
 
 ```text
-https://github.com/ike-sh/naiveproxy-server/releases/download/v1.0.5/install-naive-server.sh
+https://github.com/ike-sh/naiveproxy-server/releases/download/v1.0.6/install-naive-server.sh
 ```
 
 ### 1. 一键安装
 
 ```bash
-curl -fsSL https://github.com/ike-sh/naiveproxy-server/releases/download/v1.0.5/install-naive-server.sh | sudo bash -s -- \
+curl -fsSL https://github.com/ike-sh/naiveproxy-server/releases/download/v1.0.6/install-naive-server.sh | sudo bash -s -- \
   --domain proxy.example.com \
   --email admin@example.com \
   --site-mode static \
@@ -40,7 +40,7 @@ curl -fsSL https://github.com/ike-sh/naiveproxy-server/releases/download/v1.0.5/
 ### 2. 交互式菜单
 
 ```bash
-curl -fsSL https://github.com/ike-sh/naiveproxy-server/releases/download/v1.0.5/install-naive-server.sh | sudo bash
+curl -fsSL https://github.com/ike-sh/naiveproxy-server/releases/download/v1.0.6/install-naive-server.sh | sudo bash
 ```
 
 选择 `1. 一键安装 / 重新配置`，按向导填写。

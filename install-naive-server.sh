@@ -20,7 +20,7 @@ if [[ -n "$NAIVE_SCRIPT_DIR" && -d "$NAIVE_SCRIPT_DIR/lib" ]]; then
 fi
 
 SCRIPT_NAME="NaiveProxy Server"
-SCRIPT_VERSION="1.0.5"
+SCRIPT_VERSION="1.0.6"
 SCRIPT_AUTHOR="ike-sh"
 SCRIPT_GITHUB="https://github.com/ike-sh/naiveproxy-server"
 BUILDER_REPO_DEFAULT="ike-sh/caddy-naive-builder"
@@ -291,6 +291,7 @@ naive_append_extra_auth() {
   user="${pair%%:*}"
   pass="${pair#*:}"
   [[ -n "$user" && -n "$pass" ]] || die "--extra-auth 格式应为 user:pass，用户名和密码均不能为空。"
+  [[ "$user" != *":"* ]] || die "额外账号用户名不能包含冒号（会与 user:pass 格式冲突）。"
   [[ "$pass" != *","* ]] || die "额外账号密码不能包含逗号（会与 EXTRA_AUTH 存储格式冲突）。"
   validate_auth_user_safe "$user"
   validate_credential_token "PASS" "$pass"
@@ -346,22 +347,6 @@ caddyfile_quote() {
   printf '"%s"' "$value"
 }
 fi
-
-generate_v2rayn_link() {
-  local encoded_user encoded_pass encoded_name
-  encoded_user="$(url_encode "$AUTH_USER")"
-  encoded_pass="$(url_encode "$AUTH_PASS")"
-  encoded_name="$(url_encode "naive-${DOMAIN}")"
-  printf 'naive+https://%s:%s@%s:443?security=tls&sni=%s&insecure=0&allowInsecure=0&type=tcp&headerType=none#%s' \
-    "$encoded_user" "$encoded_pass" "$DOMAIN" "$DOMAIN" "$encoded_name"
-}
-
-generate_shadowrocket_link() {
-  local encoded_auth encoded_name
-  encoded_auth="$(base64_no_wrap "${AUTH_USER}:${AUTH_PASS}@${DOMAIN}:443")"
-  encoded_name="$(url_encode "n2")"
-  printf 'http2://%s?peer=%s&uot=1#%s' "$encoded_auth" "$DOMAIN" "$encoded_name"
-}
 
 parse_args() {
   if [[ $# -eq 0 ]]; then
@@ -2600,8 +2585,14 @@ purge_all() {
 }
 
 caddyfile_has_recommended_site() {
+  local all_hosts host
   [[ -n "$DOMAIN" && -f "$CADDYFILE" ]] || return 1
-  grep -Eq "^[[:space:]]*:443,[[:space:]]*.*${DOMAIN//./\\.}.*\\{" "$CADDYFILE"
+  grep -Eq "^[[:space:]]*:443,[[:space:]]*.*\\{" "$CADDYFILE" || return 1
+  all_hosts="$(naive_all_domains "$DOMAIN" "$EXTRA_DOMAINS")"
+  for host in $all_hosts; do
+    grep -Eq "^[[:space:]]*:443,[[:space:]]*.*${host//./\\.}.*\\{" "$CADDYFILE" || return 1
+  done
+  return 0
 }
 
 caddyfile_has_domain_only_site() {
@@ -2767,8 +2758,8 @@ print_current_client_config() {
     return 0
   fi
 
-  v2rayn_link="$(generate_v2rayn_link)"
-  shadowrocket_link="$(generate_shadowrocket_link)"
+  v2rayn_link="$(generate_v2rayn_link "$AUTH_USER" "$AUTH_PASS" "$DOMAIN" "naive-${DOMAIN}")"
+  shadowrocket_link="$(generate_shadowrocket_link "$AUTH_USER" "$AUTH_PASS" "$DOMAIN" "n2")"
 
   cat <<CONFIG
 当前服务端配置：

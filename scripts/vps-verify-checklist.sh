@@ -8,6 +8,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 INSTALL_SCRIPT="${NAIVE_INSTALL_SCRIPT:-$ROOT/install-naive-server.sh}"
 ENV_FILE="/etc/caddy/naive.env"
 DOMAIN="${1:-}"
+SERVICE_NAME="caddy"
 PUBLIC_IP=""
 PASS=0
 FAIL=0
@@ -31,20 +32,37 @@ resolve_install_script() {
       return 0
     fi
   done
-  log_info "本地未找到 install-naive-server.sh，从 v1.0.5 Release 下载到 /tmp ..."
+  log_info "本地未找到 install-naive-server.sh，从 v1.0.6 Release 下载到 /tmp ..."
   curl -fsSL \
-    "https://github.com/ike-sh/naiveproxy-server/releases/download/v1.0.5/install-naive-server.sh" \
+    "https://github.com/ike-sh/naiveproxy-server/releases/download/v1.0.6/install-naive-server.sh" \
     -o /tmp/install-naive-server.sh
   chmod +x /tmp/install-naive-server.sh
   INSTALL_SCRIPT="/tmp/install-naive-server.sh"
 }
 
-load_domain_from_env() {
-  [[ -n "$DOMAIN" ]] && return 0
+read_env_value_simple() {
+  local key="$1" line _nev
+  [[ -r "${ENV_FILE:-}" ]] || return 0
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" == "${key}="* ]] || continue
+    _nev="${line#*=}"
+    if [[ "$_nev" =~ ^[A-Za-z0-9._:@+-]+$ ]]; then
+      printf '%s' "$_nev"
+    else
+      # shellcheck disable=SC2292
+      eval "_nev=${_nev}"
+      printf '%s' "$_nev"
+    fi
+    return 0
+  done < "$ENV_FILE"
+}
+
+load_install_info_from_env() {
   [[ -r "$ENV_FILE" ]] || return 0
-  # shellcheck disable=SC1090
-  . "$ENV_FILE"
-  DOMAIN="${DOMAIN:-}"
+  [[ -n "$DOMAIN" ]] || DOMAIN="$(read_env_value_simple DOMAIN || true)"
+  local svc
+  svc="$(read_env_value_simple SERVICE_NAME || true)"
+  [[ -n "$svc" ]] && SERVICE_NAME="$svc"
 }
 
 detect_public_ip() {
@@ -81,10 +99,10 @@ check_status() {
     log_fail "#3 --status 执行失败"
     return
   fi
-  if systemctl is-active --quiet caddy 2>/dev/null || systemctl is-active --quiet caddy-naive 2>/dev/null; then
-    log_ok "#3 Caddy 服务 active"
+  if systemctl is-active --quiet "$SERVICE_NAME" 2>/dev/null; then
+    log_ok "#3 服务 ${SERVICE_NAME} active"
   else
-    log_fail "#3 Caddy 服务未 active（请检查 systemctl status）"
+    log_fail "#3 服务 ${SERVICE_NAME} 未 active（请检查 systemctl status）"
   fi
   log_manual "#4 请在上文 --status 输出中确认「推荐结构 OK」"
 }
@@ -111,11 +129,7 @@ check_proxy_self_test() {
 
 check_restart() {
   log_info "=== #10 重启恢复 ==="
-  local svc="caddy"
-  if systemctl list-unit-files caddy-naive.service --no-legend 2>/dev/null | grep -q .; then
-    svc="caddy-naive"
-  fi
-  if systemctl restart "$svc"; then
+  if systemctl restart "$SERVICE_NAME"; then
     sleep 5
     if curl -fsS4I --connect-timeout 10 "https://${DOMAIN}" >/dev/null 2>&1; then
       log_ok "#10 重启后 HTTPS 正常"
@@ -123,7 +137,7 @@ check_restart() {
       log_fail "#10 重启后 HTTPS 探测失败"
     fi
   else
-    log_fail "#10 systemctl restart $svc 失败"
+    log_fail "#10 systemctl restart ${SERVICE_NAME} 失败"
   fi
 }
 
@@ -142,10 +156,11 @@ MANUAL
 main() {
   [[ "${EUID:-0}" -eq 0 ]] || { log_fail "请使用 root 运行"; exit 1; }
   resolve_install_script
-  load_domain_from_env
+  load_install_info_from_env
   detect_public_ip
   log_info "使用脚本：$INSTALL_SCRIPT"
   log_info "验证域名：${DOMAIN:-（未设置）}"
+  log_info "服务名：${SERVICE_NAME}"
 
   check_dns
   check_status
