@@ -4,6 +4,14 @@ All notable changes to [naiveproxy-server](https://github.com/ike-sh/naiveproxy-
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.5] - 2026-06-08
+
+### Fixed
+
+- `read_env_value` 正确解析 bash `%q` 裸转义值（如含逗号密码）
+- `build-monolith.sh` ShellCheck 语法；CI 使用 `-S error`
+- 添加 `.gitattributes` 统一 `*.sh` 为 LF
+
 ## [1.0.4] - 2026-06-08
 
 ### Added
@@ -95,6 +103,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - 代理核心自检、SSL 诊断、认证管理
 - HTTP3 开关、probe_resistance 控制
 
+[1.0.5]: https://github.com/ike-sh/naiveproxy-server/compare/v1.0.4...v1.0.5
 [1.0.4]: https://github.com/ike-sh/naiveproxy-server/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/ike-sh/naiveproxy-server/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/ike-sh/naiveproxy-server/compare/v1.0.1...v1.0.2
