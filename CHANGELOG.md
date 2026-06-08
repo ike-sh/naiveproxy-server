@@ -4,6 +4,28 @@ All notable changes to [naiveproxy-server](https://github.com/ike-sh/naiveproxy-
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.4] - 2026-06-08
+
+### Added
+
+- `lib/env.sh`：`naive.env` 使用 bash `%q` 安全读写
+- `lib/update-core.sh`：更新脚本核心逻辑独立模块，消除 370 行内嵌重复
+- 交互向导支持额外域名 / 额外账号配置
+- `tests/bats/env.bats` 环境文件读写测试
+- `scripts/sync-embedded-update-core.js`：同步内嵌 update-core 到单文件发布版
+
+### Changed
+
+- `write_update_script` 优先 `cat lib/update-core.sh`，curl 单文件版内嵌 fallback
+- `--enable-http3` / probe 切换：已安装环境下不再要求 CLI 不传 `--domain`
+- 合并 `service_exists` → `unit_exists` 统一 systemd 检测
+- `build-monolith.sh` 内联 `env.sh`
+
+### Fixed
+
+- 遗留审查项全部落地（env 转义、向导多域名、HTTP3 运维切换等）
+- `update_env_release_sha` 改用 `%q` 写入，与 `write_env_file` 一致
+
 ## [1.0.3] - 2026-06-08
 
 ### Fixed
@@ -73,6 +95,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - 代理核心自检、SSL 诊断、认证管理
 - HTTP3 开关、probe_resistance 控制
 
+[1.0.4]: https://github.com/ike-sh/naiveproxy-server/compare/v1.0.3...v1.0.4
 [1.0.3]: https://github.com/ike-sh/naiveproxy-server/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/ike-sh/naiveproxy-server/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/ike-sh/naiveproxy-server/compare/v1.0.0...v1.0.1

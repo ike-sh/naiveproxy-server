@@ -16,10 +16,11 @@ if [[ -n "$NAIVE_SCRIPT_DIR" && -d "$NAIVE_SCRIPT_DIR/lib" ]]; then
   # shellcheck source=lib/links.sh
   source "$NAIVE_SCRIPT_DIR/lib/links.sh"
   source "$NAIVE_SCRIPT_DIR/lib/validate.sh"
+  source "$NAIVE_SCRIPT_DIR/lib/env.sh"
 fi
 
 SCRIPT_NAME="NaiveProxy Server"
-SCRIPT_VERSION="1.0.3"
+SCRIPT_VERSION="1.0.4"
 SCRIPT_AUTHOR="ike-sh"
 SCRIPT_GITHUB="https://github.com/ike-sh/naiveproxy-server"
 BUILDER_REPO_DEFAULT="ike-sh/caddy-naive-builder"
@@ -796,6 +797,36 @@ confirm_interactive_install() {
   esac
 }
 
+prompt_interactive_extra_options() {
+  local input
+  if prompt_yes_no "是否添加额外绑定域名" "N"; then
+    while true; do
+      printf '额外域名（留空结束）：'
+      read_tty input || break
+      input="${input//$'\r'/}"
+      [[ -n "$input" ]] || break
+      naive_append_extra_domain "$input"
+    done
+  fi
+  if prompt_yes_no "是否添加额外认证账号" "N"; then
+    while true; do
+      printf '额外账号 user:pass（留空结束）：'
+      read_tty input || break
+      input="${input//$'\r'/}"
+      [[ -n "$input" ]] || break
+      naive_append_extra_auth "$input"
+    done
+  fi
+}
+
+naive_install_requested() {
+  [[ "$MENU_MODE" -eq 1 || "$INTERACTIVE" -eq 1 ]] && return 0
+  [[ -z "$DOMAIN" ]] && return 1
+  [[ -n "$EMAIL" ]] && return 0
+  [[ "$CERT_MODE" == "caddy-auto" || "$CERT_MODE" == "caddy-zerossl" ]] && return 0
+  return 1
+}
+
 run_interactive_wizard() {
   cat <<'TITLE'
 NaiveProxy Server 一键部署向导
@@ -803,6 +834,7 @@ NaiveProxy Server 一键部署向导
 TITLE
 
   prompt_text DOMAIN "部署域名 DOMAIN" "required" "示例：proxy.example.com"
+  prompt_interactive_extra_options
   prompt_text EMAIL "ACME 邮箱 EMAIL，可选" "optional"
   prompt_cert_mode
   if [[ "$CERT_MODE" == "acme-standalone" && -z "$EMAIL" ]]; then
@@ -1042,17 +1074,27 @@ parse_upstream() {
   log_warn "反代第三方网站可能受 CSP、Cookie、登录、跳转和法律合规影响，建议只反代自己有权使用的网站或普通公开静态站点。"
 }
 
+if [[ -z "${NAIVE_LIB_LOADED:-}" ]]; then
 read_env_value() {
-  local key="$1"
-  local line value
+  local key="$1" line _nev
   [[ -r "$ENV_FILE" ]] || return 0
-  while IFS= read -r line; do
-    [[ "$line" == "$key="* ]] || continue
-    value="${line#*=}"
-    printf '%s' "$value"
+  while IFS= read -r line || [[ -n "$line" ]]; do
+    [[ "$line" == "${key}="* ]] || continue
+    _nev="${line#*=}"
+    if [[ "$_nev" =~ ^\' || "$_nev" =~ ^\" || "$_nev" == *\$\'* ]]; then
+      eval "_nev=${_nev}"
+      printf '%s' "$_nev"
+    else
+      printf '%s' "$_nev"
+    fi
     return 0
   done < "$ENV_FILE"
 }
+
+write_env_kv() {
+  printf '%s=%q\n' "$1" "$2"
+}
+fi
 
 load_saved_install_info() {
   local value
@@ -1925,15 +1967,14 @@ issue_local_cert_workflow() {
   write_caddyfile_local_cert
 }
 
-write_update_script() {
-  backup_file "$UPDATE_SCRIPT"
-  {
-    printf '#!/usr/bin/env bash\n'
-    printf 'set -euo pipefail\n\n'
-    printf 'DEFAULT_REPO=%q\n' "$REPO"
-    printf 'DEFAULT_INSTALL_BIN=%q\n' "$INSTALL_BIN"
-    printf 'DEFAULT_SERVICE_NAME=%q\n' "$SERVICE_NAME"
-    cat <<'UPDATE_BODY'
+_naive_cat_update_core() {
+  local core_file="${NAIVE_SCRIPT_DIR}/lib/update-core.sh"
+  if [[ -n "${NAIVE_SCRIPT_DIR:-}" && -f "$core_file" ]]; then
+    cat "$core_file"
+    return 0
+  fi
+  cat <<'NAIVE_EMBEDDED_UPDATE_CORE'
+
 BACKUP_DIR="/var/backups/caddy-naive"
 CADDYFILE="/etc/caddy/Caddyfile"
 ENV_FILE="/etc/caddy/naive.env"
@@ -1948,8 +1989,13 @@ log_error() { printf '[ERROR] %s\n' "$*" >&2; }
 log_ok() { printf '[OK] %s\n' "$*"; }
 die() { log_error "$*"; exit 1; }
 
+write_env_kv() {
+  printf '%s=%q\n' "$1" "$2"
+}
+
 TMP_DIR=""
 LAST_BACKUP_PATH=""
+DOWNLOADED_CADDY=""
 DOWNLOADED_ARCHIVE_SHA256=""
 DOWNLOADED_RELEASE_TAG=""
 
@@ -2154,6 +2200,7 @@ download_release_caddy() {
   chmod +x "$caddy_path"
   [[ -x "$caddy_path" ]] || die "解压出的 caddy 二进制不可执行。"
   DOWNLOADED_CADDY="$caddy_path"
+  log_ok "Caddy 二进制已解压。"
 }
 
 show_caddy_version_and_check_modules() {
@@ -2192,14 +2239,28 @@ install_binary() {
 }
 
 validate_caddyfile() {
+  local output_file
   [[ -f "$CADDYFILE" ]] || die "未找到 Caddyfile：$CADDYFILE"
-  "$INSTALL_BIN" validate --config "$CADDYFILE"
-  log_ok "Caddyfile 校验通过。"
+  output_file="$(mktemp)"
+  if "$INSTALL_BIN" validate --config "$CADDYFILE" >"$output_file" 2>&1; then
+    rm -f "$output_file"
+    log_ok "Caddyfile 校验通过：$CADDYFILE"
+    return 0
+  fi
+  log_error "Caddyfile 校验失败："
+  cat "$output_file" >&2
+  rm -f "$output_file"
+  return 1
+}
+
+unit_exists() {
+  local unit="$1"
+  systemctl list-unit-files "$unit" --no-legend 2>/dev/null | grep -q . \
+    || systemctl status "$unit" >/dev/null 2>&1
 }
 
 service_exists() {
-  systemctl list-unit-files "${SERVICE_NAME}.service" --no-legend 2>/dev/null | grep -q . \
-    || systemctl status "$SERVICE_NAME" >/dev/null 2>&1
+  unit_exists "${SERVICE_NAME}.service"
 }
 
 reload_or_restart_service() {
@@ -2226,50 +2287,56 @@ update_env_release_sha() {
   [[ -n "$DOWNLOADED_ARCHIVE_SHA256" ]] || return 0
   [[ -f "$ENV_FILE" ]] || return 0
 
-  local tmp_file
+  local tmp_file line key updated_at release_url
+  local tag_done=0 arch_done=0 asset_done=0 sha_done=0 url_done=0 updated_done=0
+
+  updated_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  release_url="https://github.com/${REPO}/releases/latest/download/${ASSET_NAME}"
   tmp_file="$(mktemp)"
-  awk -F= '
-    BEGIN { tag_done=0; arch_done=0; asset_done=0; builder_sha_done=0; url_done=0; updated_done=0 }
-    $1 == "BUILDER_RELEASE_TAG" {
-      print "BUILDER_RELEASE_TAG='"${DOWNLOADED_RELEASE_TAG}"'";
-      tag_done=1;
-      next
-    }
-    $1 == "BUILDER_RELEASE_ARCH" {
-      print "BUILDER_RELEASE_ARCH='"${TARGET_ARCH}"'";
-      arch_done=1;
-      next
-    }
-    $1 == "BUILDER_RELEASE_ASSET" {
-      print "BUILDER_RELEASE_ASSET='"${ASSET_NAME}"'";
-      asset_done=1;
-      next
-    }
-    $1 == "BUILDER_RELEASE_SHA256" {
-      print "BUILDER_RELEASE_SHA256='"${DOWNLOADED_ARCHIVE_SHA256}"'";
-      builder_sha_done=1;
-      next
-    }
-    $1 == "BUILDER_RELEASE_URL" {
-      print "BUILDER_RELEASE_URL=https://github.com/'"${REPO}"'/releases/latest/download/'"${ASSET_NAME}"'";
-      url_done=1;
-      next
-    }
-    $1 == "UPDATED_AT" {
-      print "UPDATED_AT='"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'";
-      updated_done=1;
-      next
-    }
-    { print }
-    END {
-      if (!tag_done) print "BUILDER_RELEASE_TAG='"${DOWNLOADED_RELEASE_TAG}"'";
-      if (!arch_done) print "BUILDER_RELEASE_ARCH='"${TARGET_ARCH}"'";
-      if (!asset_done) print "BUILDER_RELEASE_ASSET='"${ASSET_NAME}"'";
-      if (!builder_sha_done) print "BUILDER_RELEASE_SHA256='"${DOWNLOADED_ARCHIVE_SHA256}"'";
-      if (!url_done) print "BUILDER_RELEASE_URL=https://github.com/'"${REPO}"'/releases/latest/download/'"${ASSET_NAME}"'";
-      if (!updated_done) print "UPDATED_AT='"$(date -u +%Y-%m-%dT%H:%M:%SZ)"'";
-    }
-  ' "$ENV_FILE" > "$tmp_file"
+  {
+    while IFS= read -r line || [[ -n "$line" ]]; do
+      key="${line%%=*}"
+      case "$key" in
+        BUILDER_RELEASE_TAG)
+          write_env_kv BUILDER_RELEASE_TAG "$DOWNLOADED_RELEASE_TAG"
+          tag_done=1
+          continue
+          ;;
+        BUILDER_RELEASE_ARCH)
+          write_env_kv BUILDER_RELEASE_ARCH "$TARGET_ARCH"
+          arch_done=1
+          continue
+          ;;
+        BUILDER_RELEASE_ASSET)
+          write_env_kv BUILDER_RELEASE_ASSET "$ASSET_NAME"
+          asset_done=1
+          continue
+          ;;
+        BUILDER_RELEASE_SHA256)
+          write_env_kv BUILDER_RELEASE_SHA256 "$DOWNLOADED_ARCHIVE_SHA256"
+          sha_done=1
+          continue
+          ;;
+        BUILDER_RELEASE_URL)
+          write_env_kv BUILDER_RELEASE_URL "$release_url"
+          url_done=1
+          continue
+          ;;
+        UPDATED_AT)
+          write_env_kv UPDATED_AT "$updated_at"
+          updated_done=1
+          continue
+          ;;
+      esac
+      printf '%s\n' "$line"
+    done < "$ENV_FILE"
+    (( tag_done )) || write_env_kv BUILDER_RELEASE_TAG "$DOWNLOADED_RELEASE_TAG"
+    (( arch_done )) || write_env_kv BUILDER_RELEASE_ARCH "$TARGET_ARCH"
+    (( asset_done )) || write_env_kv BUILDER_RELEASE_ASSET "$ASSET_NAME"
+    (( sha_done )) || write_env_kv BUILDER_RELEASE_SHA256 "$DOWNLOADED_ARCHIVE_SHA256"
+    (( url_done )) || write_env_kv BUILDER_RELEASE_URL "$release_url"
+    (( updated_done )) || write_env_kv UPDATED_AT "$updated_at"
+  } > "$tmp_file"
   install -m 600 "$tmp_file" "$ENV_FILE"
   rm -f "$tmp_file"
   log_ok "已更新 ${ENV_FILE} 中的 Release 校验值。"
@@ -2282,7 +2349,6 @@ main() {
   require_command curl
   require_command tar
   require_command sha256sum
-  require_command awk
   require_command mktemp
   require_command find
   require_command install
@@ -2298,42 +2364,55 @@ main() {
 }
 
 main "$@"
-UPDATE_BODY
+
+NAIVE_EMBEDDED_UPDATE_CORE
+}
+
+write_update_script() {
+  backup_file "$UPDATE_SCRIPT"
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'set -euo pipefail\n\n'
+    printf 'DEFAULT_REPO=%q\n' "$REPO"
+    printf 'DEFAULT_INSTALL_BIN=%q\n' "$INSTALL_BIN"
+    printf 'DEFAULT_SERVICE_NAME=%q\n' "$SERVICE_NAME"
+    _naive_cat_update_core
   } > "$UPDATE_SCRIPT"
   chmod 755 "$UPDATE_SCRIPT"
   log_ok "更新脚本已写入：$UPDATE_SCRIPT"
 }
 
 write_env_file() {
-  local tmp_env
+  local tmp_env installed_at
   backup_file "$ENV_FILE"
   umask 077
   tmp_env="$(mktemp /tmp/naive.env.XXXXXX)"
-  cat > "$tmp_env" <<ENV
-DOMAIN=${DOMAIN}
-EMAIL=${EMAIL}
-USER=${AUTH_USER}
-PASS=${AUTH_PASS}
-EXTRA_DOMAINS=${EXTRA_DOMAINS}
-EXTRA_AUTH=${EXTRA_AUTH_RAW}
-SITE_MODE=${SITE_MODE}
-UPSTREAM=${UPSTREAM_BASE}
-REPO=${REPO}
-INSTALL_BIN=${INSTALL_BIN}
-SERVICE_NAME=${SERVICE_NAME}
-CERT_MODE=${CERT_MODE}
-CERT_FULLCHAIN=${CERT_FULLCHAIN}
-CERT_KEY=${CERT_KEY}
-HTTP3=${HTTP3}
-PROBE_RESISTANCE=${PROBE_RESISTANCE}
-BUILDER_RELEASE_TAG=${DOWNLOADED_RELEASE_TAG}
-BUILDER_RELEASE_ARCH=${TARGET_ARCH}
-BUILDER_RELEASE_ASSET=${ASSET_NAME}
-BUILDER_RELEASE_SHA256=${DOWNLOADED_ARCHIVE_SHA256}
-BUILDER_RELEASE_URL=https://github.com/${REPO}/releases/latest/download/${ASSET_NAME}
-RELEASE_SHA256=${DOWNLOADED_ARCHIVE_SHA256}
-INSTALLED_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-ENV
+  installed_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  {
+    write_env_kv DOMAIN "$DOMAIN"
+    write_env_kv EMAIL "$EMAIL"
+    write_env_kv USER "$AUTH_USER"
+    write_env_kv PASS "$AUTH_PASS"
+    write_env_kv EXTRA_DOMAINS "$EXTRA_DOMAINS"
+    write_env_kv EXTRA_AUTH "$EXTRA_AUTH_RAW"
+    write_env_kv SITE_MODE "$SITE_MODE"
+    write_env_kv UPSTREAM "$UPSTREAM_BASE"
+    write_env_kv REPO "$REPO"
+    write_env_kv INSTALL_BIN "$INSTALL_BIN"
+    write_env_kv SERVICE_NAME "$SERVICE_NAME"
+    write_env_kv CERT_MODE "$CERT_MODE"
+    write_env_kv CERT_FULLCHAIN "$CERT_FULLCHAIN"
+    write_env_kv CERT_KEY "$CERT_KEY"
+    write_env_kv HTTP3 "$HTTP3"
+    write_env_kv PROBE_RESISTANCE "$PROBE_RESISTANCE"
+    write_env_kv BUILDER_RELEASE_TAG "$DOWNLOADED_RELEASE_TAG"
+    write_env_kv BUILDER_RELEASE_ARCH "$TARGET_ARCH"
+    write_env_kv BUILDER_RELEASE_ASSET "$ASSET_NAME"
+    write_env_kv BUILDER_RELEASE_SHA256 "$DOWNLOADED_ARCHIVE_SHA256"
+    write_env_kv BUILDER_RELEASE_URL "https://github.com/${REPO}/releases/latest/download/${ASSET_NAME}"
+    write_env_kv RELEASE_SHA256 "$DOWNLOADED_ARCHIVE_SHA256"
+    write_env_kv INSTALLED_AT "$installed_at"
+  } > "$tmp_env"
   if ! mv -f "$tmp_env" "$ENV_FILE"; then
     rm -f "$tmp_env"
     log_error "覆盖安装信息失败：$ENV_FILE"
@@ -3086,6 +3165,10 @@ unit_exists() {
     || systemctl status "$unit" >/dev/null 2>&1
 }
 
+service_exists() {
+  unit_exists "${SERVICE_NAME}.service"
+}
+
 show_caddy_logs() {
   load_saved_install_info
   if ! command -v systemctl >/dev/null 2>&1 || ! command -v journalctl >/dev/null 2>&1; then
@@ -3655,7 +3738,7 @@ main() {
     exit 0
   fi
 
-  if [[ "$ACTION_STATUS" -eq 1 || "$ACTION_CHECK_UPDATE" -eq 1 || "$ACTION_UPDATE" -eq 1 || "$ACTION_FORCE_UPDATE" -eq 1 || "$ACTION_SHOW_CLIENT" -eq 1 || "$ACTION_LOGS" -eq 1 || "$ACTION_ISSUE_CERT" -eq 1 || "$ACTION_TLS_DIAGNOSE" -eq 1 || "$ACTION_CHANGE_USER" -eq 1 || "$ACTION_CHANGE_PASS" -eq 1 || "$ACTION_PROXY_SELF_TEST" -eq 1 || "$ACTION_FIX_STATIC_PERMS" -eq 1 || ( "$ACTION_HTTP3_TOGGLE" -eq 1 && -z "$DOMAIN" ) || ( "$ACTION_PROBE_TOGGLE" -eq 1 && -z "$DOMAIN" ) || -n "$SET_USER_VALUE" || -n "$SET_PASS_VALUE" ]]; then
+  if [[ "$ACTION_STATUS" -eq 1 || "$ACTION_CHECK_UPDATE" -eq 1 || "$ACTION_UPDATE" -eq 1 || "$ACTION_FORCE_UPDATE" -eq 1 || "$ACTION_SHOW_CLIENT" -eq 1 || "$ACTION_LOGS" -eq 1 || "$ACTION_ISSUE_CERT" -eq 1 || "$ACTION_TLS_DIAGNOSE" -eq 1 || "$ACTION_CHANGE_USER" -eq 1 || "$ACTION_CHANGE_PASS" -eq 1 || "$ACTION_PROXY_SELF_TEST" -eq 1 || "$ACTION_FIX_STATIC_PERMS" -eq 1 || ( "$ACTION_HTTP3_TOGGLE" -eq 1 && ! naive_install_requested ) || ( "$ACTION_PROBE_TOGGLE" -eq 1 && ! naive_install_requested ) || -n "$SET_USER_VALUE" || -n "$SET_PASS_VALUE" ]]; then
     [[ "$ACTION_STATUS" -eq 1 ]] && show_current_status
     [[ "$ACTION_CHECK_UPDATE" -eq 1 ]] && detect_update
     [[ "$ACTION_UPDATE" -eq 1 ]] && update_caddy_kernel 0
@@ -3666,12 +3749,8 @@ main() {
     [[ "$ACTION_CHANGE_PASS" -eq 1 ]] && change_auth_pass_interactive
     [[ "$ACTION_PROXY_SELF_TEST" -eq 1 ]] && proxy_self_test
     [[ "$ACTION_FIX_STATIC_PERMS" -eq 1 ]] && fix_static_site_permissions_menu
-    if [[ "$ACTION_HTTP3_TOGGLE" -eq 1 && -z "$DOMAIN" ]]; then
-      set_http3_config "$HTTP3"
-    fi
-    if [[ "$ACTION_PROBE_TOGGLE" -eq 1 && -z "$DOMAIN" ]]; then
-      set_probe_resistance_config "$PROBE_RESISTANCE"
-    fi
+    [[ "$ACTION_HTTP3_TOGGLE" -eq 1 ]] && set_http3_config "$HTTP3"
+    [[ "$ACTION_PROBE_TOGGLE" -eq 1 ]] && set_probe_resistance_config "$PROBE_RESISTANCE"
     if [[ -n "$SET_USER_VALUE" || -n "$SET_PASS_VALUE" ]]; then
       set_auth_credentials_cli
     fi

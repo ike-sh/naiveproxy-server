@@ -25,7 +25,7 @@ awk '
 INLINE="$(mktemp)"
 {
   echo '# NAIVE_LIB_INLINE_START'
-  for lib in common.sh encoding.sh links.sh validate.sh; do
+  for lib in common.sh encoding.sh links.sh validate.sh env.sh; do
     echo "# --- lib/${lib} ---"
     awk '!/^#!/ && $0 != "NAIVE_LIB_LOADED=1" { print }' "${ROOT}/lib/${lib}"
     echo
@@ -43,9 +43,9 @@ awk -v inline="$INLINE" '
   }
 ' "$TMP" > "$OUT"
 
-# 禁用主脚本中的 fallback 日志块
-sed -i 's/^if \[\[ -z "\${NAIVE_LIB_LOADED:-}" \]\]; then$/if false; then/' "$OUT" 2>/dev/null \
-  || sed -i '' 's/^if \[\[ -z "\${NAIVE_LIB_LOADED:-}" \]\]; then$/if false; then/' "$OUT"
+# 禁用主脚本中所有 lib fallback 块（log / encoding / env / validate）
+sed -i 's/^if \[\[ -z "\${NAIVE_LIB_LOADED:-}" \]\]; then$/if false; then/g' "$OUT" 2>/dev/null \
+  || sed -i '' 's/^if \[\[ -z "\${NAIVE_LIB_LOADED:-}" \]\]; then$/if false; then/g' "$OUT"
 
 chmod +x "$OUT"
 echo "[OK] $OUT"

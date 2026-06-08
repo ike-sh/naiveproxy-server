@@ -1,4 +1,4 @@
-# NaiveProxy Server 1.0.3
+# NaiveProxy Server 1.0.4
 
 作者：ike-sh  
 GitHub：https://github.com/ike-sh/naiveproxy-server  
@@ -8,7 +8,12 @@ Builder 仓库：https://github.com/ike-sh/caddy-naive-builder
 
 **文档**：详细部署见 [DEPLOY.md](DEPLOY.md)，架构说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，版本历史见 [CHANGELOG.md](CHANGELOG.md)。
 
-**开发**：仓库克隆后直接运行 `install-naive-server.sh`（自动加载 `lib/`）。发布单文件前执行 `bash scripts/build-monolith.sh`，产物在 `dist/install-naive-server.sh`。
+**开发**：仓库克隆后直接运行 `install-naive-server.sh`（自动加载 `lib/`）。发布单文件前执行 `bash scripts/build-monolith.sh`，产物在 `dist/install-naive-server.sh`。修改 `lib/update-core.sh` 后执行 `node scripts/sync-embedded-update-core.js` 同步内嵌副本。
+
+## v1.0.4 更新
+
+- `naive.env` 使用 `%q` 安全转义；更新逻辑提取至 `lib/update-core.sh`
+- 交互向导支持多域名/多账号；运维切换 HTTP3/probe 更可靠
 
 ## v1.0.3 更新
 
