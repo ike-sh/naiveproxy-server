@@ -9,13 +9,14 @@ read_env_value() {
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" == "${key}="* ]] || continue
     _nev="${line#*=}"
-    case "$_nev" in
-      \"*|\'*|\$\'*|\$\"*)
-        # shellcheck disable=SC2292
-        eval "_nev=${_nev}"
-        ;;
-    esac
-    printf '%s' "$_nev"
+    if [[ "$_nev" =~ ^[A-Za-z0-9._:@+-]+$ ]]; then
+      printf '%s' "$_nev"
+    else
+      # bash %q may emit bare escapes (e.g. p@ss:w0rd\,ok); eval restores the value
+      # shellcheck disable=SC2292
+      eval "_nev=${_nev}"
+      printf '%s' "$_nev"
+    fi
     return 0
   done < "$ENV_FILE"
 }

@@ -1081,12 +1081,12 @@ read_env_value() {
   while IFS= read -r line || [[ -n "$line" ]]; do
     [[ "$line" == "${key}="* ]] || continue
     _nev="${line#*=}"
-    case "$_nev" in
-      \"*|\'*|\$\'*|\$\"*)
-        eval "_nev=${_nev}"
-        ;;
-    esac
-    printf '%s' "$_nev"
+    if [[ "$_nev" =~ ^[A-Za-z0-9._:@+-]+$ ]]; then
+      printf '%s' "$_nev"
+    else
+      eval "_nev=${_nev}"
+      printf '%s' "$_nev"
+    fi
     return 0
   done < "$ENV_FILE"
 }

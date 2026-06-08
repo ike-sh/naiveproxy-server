@@ -44,8 +44,9 @@ awk -v inline="$INLINE" '
 ' "$TMP" > "$OUT"
 
 # 禁用主脚本中所有 lib fallback 块（log / encoding / env / validate）
-sed -i 's/^if \[\[ -z "\${NAIVE_LIB_LOADED:-}" \]\]; then$/if false; then/g' "$OUT" 2>/dev/null \
-  || sed -i '' 's/^if \[\[ -z "\${NAIVE_LIB_LOADED:-}" \]\]; then$/if false; then/g' "$OUT"
+if ! sed -i 's/^if \[\[ -z "\${NAIVE_LIB_LOADED:-}" \]\]; then$/if false; then/g' "$OUT" 2>/dev/null; then
+  sed -i '' 's/^if \[\[ -z "\${NAIVE_LIB_LOADED:-}" \]\]; then$/if false; then/g' "$OUT"
+fi
 
 chmod +x "$OUT"
 echo "[OK] $OUT"
