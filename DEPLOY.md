@@ -1,6 +1,11 @@
 # NaiveProxy Server 部署指南
 
-> 仓库：[https://github.com/ike-sh/naiveproxy-server](https://github.com/ike-sh/naiveproxy-server)
+[![CI](https://github.com/ike-sh/naiveproxy-server/actions/workflows/ci.yml/badge.svg)](https://github.com/ike-sh/naiveproxy-server/actions/workflows/ci.yml)
+[![Release](https://github.com/ike-sh/naiveproxy-server/actions/workflows/release.yml/badge.svg)](https://github.com/ike-sh/naiveproxy-server/actions/workflows/release.yml)
+[![Latest Release](https://img.shields.io/github/v/release/ike-sh/naiveproxy-server?label=stable)](https://github.com/ike-sh/naiveproxy-server/releases/latest)
+
+> 仓库：[https://github.com/ike-sh/naiveproxy-server](https://github.com/ike-sh/naiveproxy-server)  
+> 当前推荐版本：**[v1.0.5](https://github.com/ike-sh/naiveproxy-server/releases/tag/v1.0.5)** · [CHANGELOG](CHANGELOG.md) · [架构说明](docs/ARCHITECTURE.md)
 
 ## 前置条件
 
