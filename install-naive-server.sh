@@ -15,10 +15,11 @@ if [[ -n "$NAIVE_SCRIPT_DIR" && -d "$NAIVE_SCRIPT_DIR/lib" ]]; then
   source "$NAIVE_SCRIPT_DIR/lib/encoding.sh"
   # shellcheck source=lib/links.sh
   source "$NAIVE_SCRIPT_DIR/lib/links.sh"
+  source "$NAIVE_SCRIPT_DIR/lib/validate.sh"
 fi
 
 SCRIPT_NAME="NaiveProxy Server"
-SCRIPT_VERSION="1.0.2"
+SCRIPT_VERSION="1.0.3"
 SCRIPT_AUTHOR="ike-sh"
 SCRIPT_GITHUB="https://github.com/ike-sh/naiveproxy-server"
 BUILDER_REPO_DEFAULT="ike-sh/caddy-naive-builder"
@@ -87,7 +88,6 @@ SET_USER_VALUE=""
 SET_PASS_VALUE=""
 DO_UNINSTALL=0
 DO_PURGE=0
-TIMESTAMP="$(date +%Y%m%d_%H%M%S)"
 LAST_BACKUP_PATH=""
 TMP_DIR=""
 DOWNLOADED_CADDY=""
@@ -103,17 +103,6 @@ log_warn() { printf '[WARN] %s\n' "$*" >&2; }
 log_error() { printf '[ERROR] %s\n' "$*" >&2; }
 log_ok() { printf '[OK] %s\n' "$*"; }
 die() { log_error "$*"; exit 1; }
-
-mask_secret() {
-  local value="$1"
-  local visible="${2:-4}"
-  local len="${#value}"
-  if (( len <= visible )); then
-    printf '****'
-    return 0
-  fi
-  printf '%s****' "${value:0:visible}"
-}
 fi
 
 read_tty() {
@@ -252,6 +241,10 @@ refresh_paths() {
 }
 
 naive_all_domains() {
+  if [[ -n "${NAIVE_LIB_LOADED:-}" ]] && declare -f build_all_domains_list >/dev/null 2>&1; then
+    build_all_domains_list "$@"
+    return 0
+  fi
   local primary="$1"
   local extra="$2"
   local result="$primary"
@@ -270,9 +263,19 @@ naive_all_domains() {
 
 naive_append_extra_domain() {
   local domain="$1"
+  local item
   [[ -n "$domain" ]] || return 0
-  validate_domain "$domain"
+  validate_hostname "$domain" "额外域名"
+  if [[ -n "$DOMAIN" && "$domain" == "$DOMAIN" ]]; then
+    die "额外域名不能与主域名相同：${domain}"
+  fi
   if [[ -n "$EXTRA_DOMAINS" ]]; then
+    IFS=',' read -ra _naive_dup_check <<< "$EXTRA_DOMAINS"
+    for item in "${_naive_dup_check[@]}"; do
+      item="${item#"${item%%[![:space:]]*}"}"
+      item="${item%"${item##*[![:space:]]}"}"
+      [[ "$item" != "$domain" ]] || die "额外域名重复：${domain}"
+    done
     EXTRA_DOMAINS+=",${domain}"
   else
     EXTRA_DOMAINS="$domain"
@@ -286,6 +289,8 @@ naive_append_extra_auth() {
   [[ "$pair" == *:* ]] || die "--extra-auth 格式应为 user:pass"
   user="${pair%%:*}"
   pass="${pair#*:}"
+  [[ -n "$user" && -n "$pass" ]] || die "--extra-auth 格式应为 user:pass，用户名和密码均不能为空。"
+  [[ "$pass" != *","* ]] || die "额外账号密码不能包含逗号（会与 EXTRA_AUTH 存储格式冲突）。"
   validate_auth_user_safe "$user"
   validate_credential_token "PASS" "$pass"
   if [[ -n "$EXTRA_AUTH_RAW" ]]; then
@@ -295,6 +300,7 @@ naive_append_extra_auth() {
   fi
 }
 
+if [[ -z "${NAIVE_LIB_LOADED:-}" ]]; then
 url_encode() {
   local input="$1"
   local output="" char hex i
@@ -315,13 +321,6 @@ url_encode() {
   printf '%s' "$output"
 }
 
-build_proxy_url() {
-  local encoded_user encoded_pass
-  encoded_user="$(url_encode "$AUTH_USER")"
-  encoded_pass="$(url_encode "$AUTH_PASS")"
-  printf 'https://%s:%s@%s' "$encoded_user" "$encoded_pass" "$DOMAIN"
-}
-
 base64_no_wrap() {
   local input="$1"
   local encoded
@@ -339,6 +338,14 @@ base64_no_wrap() {
   printf '%s' "$encoded"
 }
 
+caddyfile_quote() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  printf '"%s"' "$value"
+}
+fi
+
 generate_v2rayn_link() {
   local encoded_user encoded_pass encoded_name
   encoded_user="$(url_encode "$AUTH_USER")"
@@ -353,30 +360,6 @@ generate_shadowrocket_link() {
   encoded_auth="$(base64_no_wrap "${AUTH_USER}:${AUTH_PASS}@${DOMAIN}:443")"
   encoded_name="$(url_encode "n2")"
   printf 'http2://%s?peer=%s&uot=1#%s' "$encoded_auth" "$DOMAIN" "$encoded_name"
-}
-
-caddyfile_quote() {
-  local value="$1"
-  value="${value//\\/\\\\}"
-  value="${value//\"/\\\"}"
-  printf '"%s"' "$value"
-}
-
-json_escape() {
-  local value="$1"
-  value="${value//\\/\\\\}"
-  value="${value//\"/\\\"}"
-  value="${value//$'\n'/\\n}"
-  value="${value//$'\r'/\\r}"
-  value="${value//$'\t'/\\t}"
-  printf '%s' "$value"
-}
-
-yaml_double_quote() {
-  local value="$1"
-  value="${value//\\/\\\\}"
-  value="${value//\"/\\\"}"
-  printf '"%s"' "$value"
 }
 
 parse_args() {
@@ -992,12 +975,22 @@ install_dependencies() {
   log_ok "基础依赖已就绪。"
 }
 
+if [[ -z "${NAIVE_LIB_LOADED:-}" ]]; then
+validate_hostname() {
+  local name="$1"
+  local label="${2:-域名}"
+  [[ -n "$name" ]] || die "${label} 不能为空。"
+  [[ "$name" != *"://"* ]] || die "${label} 必须是域名，不是 URL。"
+  [[ "$name" != *"/"* ]] || die "${label} 不能包含路径。"
+  [[ "$name" != *","* ]] || die "${label} 不能包含逗号。"
+  [[ "$name" =~ ^[A-Za-z0-9.-]+$ ]] || die "${label} 包含不支持的字符：${name}"
+  [[ "$name" == *.* ]] || log_warn "${label} 不包含点号，公网 TLS 证书申请可能失败：${name}"
+}
+fi
+
 validate_domain() {
   [[ -n "$DOMAIN" ]] || die "必须提供 --domain。"
-  [[ "$DOMAIN" != *"://"* ]] || die "--domain 必须是域名，不是 URL。"
-  [[ "$DOMAIN" != *"/"* ]] || die "--domain 不能包含路径。"
-  [[ "$DOMAIN" =~ ^[A-Za-z0-9.-]+$ ]] || die "--domain 包含不支持的字符。"
-  [[ "$DOMAIN" == *.* ]] || log_warn "域名不包含点号，公网 TLS 证书申请可能失败。"
+  validate_hostname "$DOMAIN" "主域名"
   refresh_cert_paths
 }
 
@@ -1584,7 +1577,7 @@ write_caddyfile_content() {
     fi
     printf '  }\n'
     printf '}\n\n'
-    printf 'http://%s {\n' "$DOMAIN"
+    printf 'http://%s {\n' "$site_hosts"
     printf '  redir https://{host}{uri} permanent\n'
     printf '}\n\n'
     printf ':443, %s {\n' "$site_hosts"
@@ -1721,12 +1714,18 @@ cert_days_left() {
 }
 
 should_issue_cert() {
-  local old_domain days_left
+  local old_domain old_extra days_left
   refresh_cert_paths
   old_domain="$(read_env_value DOMAIN || true)"
+  old_extra="$(read_env_value EXTRA_DOMAINS || true)"
 
   if [[ -n "$old_domain" && "$old_domain" != "$DOMAIN" ]]; then
     log_warn "域名已变化，需要重新签发本地证书。"
+    return 0
+  fi
+
+  if [[ "${old_extra:-}" != "${EXTRA_DOMAINS:-}" ]]; then
+    log_warn "额外域名已变化，需要重新签发 SAN 证书。"
     return 0
   fi
 
@@ -2496,7 +2495,9 @@ purge_all() {
 
   mkdir -p "$BACKUP_DIR"
   chmod 700 "$BACKUP_DIR" 2>/dev/null || true
-  local purge_backup="${BACKUP_DIR}/purge.${TIMESTAMP}.tar.gz"
+  local purge_backup purge_ts
+  purge_ts="$(date +%Y%m%d_%H%M%S)"
+  purge_backup="${BACKUP_DIR}/purge.${purge_ts}.tar.gz"
   if [[ -e "$CONFIG_DIR" || -e "$SITE_DIR" ]]; then
     tar -czf "$purge_backup" "$CONFIG_DIR" "$SITE_DIR" 2>/dev/null || log_warn "无法创建彻底卸载前的备份压缩包。"
     [[ -s "$purge_backup" ]] && log_info "已创建彻底卸载前备份：$purge_backup"
@@ -2521,7 +2522,7 @@ purge_all() {
 
 caddyfile_has_recommended_site() {
   [[ -n "$DOMAIN" && -f "$CADDYFILE" ]] || return 1
-  grep -Eq "^[[:space:]]*:443,[[:space:]]*${DOMAIN//./\\.}[[:space:]]*\\{" "$CADDYFILE"
+  grep -Eq "^[[:space:]]*:443,[[:space:]]*.*${DOMAIN//./\\.}.*\\{" "$CADDYFILE"
 }
 
 caddyfile_has_domain_only_site() {
@@ -3086,15 +3087,16 @@ unit_exists() {
 }
 
 show_caddy_logs() {
+  load_saved_install_info
   if ! command -v systemctl >/dev/null 2>&1 || ! command -v journalctl >/dev/null 2>&1; then
     printf '[WARN] journalctl 或 systemctl 不存在，无法查看日志。\n'
     return 0
   fi
 
-  if unit_exists "caddy.service"; then
-    journalctl -u caddy -e --no-pager
+  if unit_exists "${SERVICE_NAME}.service"; then
+    journalctl -u "$SERVICE_NAME" -e --no-pager
   else
-    printf '[WARN] caddy.service 不存在，可能尚未安装。\n'
+    printf '[WARN] %s.service 不存在，可能尚未安装。\n' "$SERVICE_NAME"
   fi
 }
 

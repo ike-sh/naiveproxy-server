@@ -4,6 +4,23 @@ All notable changes to [naiveproxy-server](https://github.com/ike-sh/naiveproxy-
 
 Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.0.3] - 2026-06-08
+
+### Fixed
+
+- `--extra-domain` 误调用 `validate_domain` 导致未校验额外域名、参数顺序敏感
+- 多域名场景下 `caddyfile_has_recommended_site` 误报结构异常
+- 额外域名变更后 `should_issue_cert` 未触发 SAN 证书重签
+- 多域名 HTTP→HTTPS 重定向仅覆盖主域名
+- `show_caddy_logs` 硬编码 `caddy.service` 忽略自定义 `SERVICE_NAME`
+- `purge` 备份使用脚本启动时间戳而非操作时刻
+- `--extra-auth` 密码含逗号时解析错误（现明确拒绝）
+
+### Removed
+
+- 孤立函数：`build_proxy_url`、`json_escape`、`yaml_double_quote`
+- 未使用的全局变量 `TIMESTAMP`
+
 ## [1.0.2] - 2026-06-08
 
 ### Added
@@ -56,6 +73,7 @@ Format based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - 代理核心自检、SSL 诊断、认证管理
 - HTTP3 开关、probe_resistance 控制
 
+[1.0.3]: https://github.com/ike-sh/naiveproxy-server/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/ike-sh/naiveproxy-server/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/ike-sh/naiveproxy-server/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/ike-sh/naiveproxy-server/releases/tag/v1.0.0

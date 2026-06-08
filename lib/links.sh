@@ -2,16 +2,6 @@
 # NaiveProxy Server — client link generators
 # Requires: lib/encoding.sh
 
-build_proxy_url() {
-  local user="$1"
-  local pass="$2"
-  local domain="$3"
-  local encoded_user encoded_pass
-  encoded_user="$(url_encode "$user")"
-  encoded_pass="$(url_encode "$pass")"
-  printf 'https://%s:%s@%s:443' "$encoded_user" "$encoded_pass" "$domain"
-}
-
 generate_v2rayn_link() {
   local user="$1"
   local pass="$2"

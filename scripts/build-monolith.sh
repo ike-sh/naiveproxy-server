@@ -25,7 +25,7 @@ awk '
 INLINE="$(mktemp)"
 {
   echo '# NAIVE_LIB_INLINE_START'
-  for lib in common.sh encoding.sh links.sh; do
+  for lib in common.sh encoding.sh links.sh validate.sh; do
     echo "# --- lib/${lib} ---"
     awk '!/^#!/ && $0 != "NAIVE_LIB_LOADED=1" { print }' "${ROOT}/lib/${lib}"
     echo
