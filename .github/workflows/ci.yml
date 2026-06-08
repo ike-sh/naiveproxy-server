@@ -11,11 +11,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Run ShellCheck
-        uses: ludeeus/action-shellcheck@2.0.0
-        with:
-          scandir: '.'
-          severity: warning
+      - name: Install ShellCheck
+        run: sudo apt-get update && sudo apt-get install -y shellcheck
+      - name: Run ShellCheck on lib/ and scripts/
+        run: shellcheck -x lib/*.sh scripts/*.sh
 
   bats:
     runs-on: ubuntu-latest

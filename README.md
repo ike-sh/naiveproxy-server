@@ -6,7 +6,9 @@ Builder 仓库：https://github.com/ike-sh/caddy-naive-builder
 
 这是一个面向 Debian/Ubuntu `linux-amd64` / `linux-arm64` 服务器的 NaiveProxy 服务端一键管理脚本。脚本会根据 `uname -m` 自动选择 Builder Release 里的 Caddy naive 二进制，不安装 Go，不安装 xcaddy，也不在服务器本地编译 Caddy。
 
-**文档**：详细部署见 [DEPLOY.md](DEPLOY.md)，架构说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+**文档**：详细部署见 [DEPLOY.md](DEPLOY.md)，架构说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，版本历史见 [CHANGELOG.md](CHANGELOG.md)。
+
+**开发**：仓库克隆后直接运行 `install-naive-server.sh`（自动加载 `lib/`）。发布单文件前执行 `bash scripts/build-monolith.sh`，产物在 `dist/install-naive-server.sh`。
 
 ## v1.0.2 更新
 
