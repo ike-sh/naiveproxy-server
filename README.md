@@ -1,10 +1,18 @@
-# NaiveProxy Server 1.0.1 稳定版
+# NaiveProxy Server 1.0.2
 
 作者：ike-sh  
 GitHub：https://github.com/ike-sh/naiveproxy-server  
 Builder 仓库：https://github.com/ike-sh/caddy-naive-builder
 
 这是一个面向 Debian/Ubuntu `linux-amd64` / `linux-arm64` 服务器的 NaiveProxy 服务端一键管理脚本。脚本会根据 `uname -m` 自动选择 Builder Release 里的 Caddy naive 二进制，不安装 Go，不安装 xcaddy，也不在服务器本地编译 Caddy。
+
+**文档**：详细部署见 [DEPLOY.md](DEPLOY.md)，架构说明见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)。
+
+## v1.0.2 更新
+
+- 支持 `--extra-domain` / `--extra-auth` 多域名与多账号
+- `lib/` 模块化拆分，配套 Bats 单元测试与 GitHub Actions CI
+- 备份时间戳独立生成，acme.sh 安装增加 HTTPS 与格式校验
 
 当前支持的 Release 资产：
 
@@ -96,6 +104,19 @@ bash install-naive-server.sh \
 ```
 
 带完整参数时会直接无人值守安装，不进入菜单。管道 / 非 TTY 场景无参数运行会显示 usage 并非 0 退出。
+
+### 多域名 / 多账号
+
+```bash
+bash install-naive-server.sh \
+  --domain proxy.example.com \
+  --extra-domain www.proxy.example.com \
+  --extra-auth friend:SecurePass123 \
+  --email me@example.com \
+  --cert-mode acme-standalone
+```
+
+每个额外域名需有有效 DNS 记录；`acme-standalone` 会为所有域名申请 SAN 证书。
 
 ## 证书模式
 

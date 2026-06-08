@@ -1,8 +1,24 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+_naive_resolve_script_dir() {
+  if [[ -n "${BASH_SOURCE[0]}" && "${BASH_SOURCE[0]}" != /dev/fd/* && -f "${BASH_SOURCE[0]}" ]]; then
+    cd "$(dirname "${BASH_SOURCE[0]}")" && pwd
+  fi
+}
+
+NAIVE_SCRIPT_DIR="$(_naive_resolve_script_dir)"
+if [[ -n "$NAIVE_SCRIPT_DIR" && -d "$NAIVE_SCRIPT_DIR/lib" ]]; then
+  # shellcheck source=lib/common.sh
+  source "$NAIVE_SCRIPT_DIR/lib/common.sh"
+  # shellcheck source=lib/encoding.sh
+  source "$NAIVE_SCRIPT_DIR/lib/encoding.sh"
+  # shellcheck source=lib/links.sh
+  source "$NAIVE_SCRIPT_DIR/lib/links.sh"
+fi
+
 SCRIPT_NAME="NaiveProxy Server"
-SCRIPT_VERSION="1.0.1"
+SCRIPT_VERSION="1.0.2"
 SCRIPT_AUTHOR="ike-sh"
 SCRIPT_GITHUB="https://github.com/ike-sh/naiveproxy-server"
 BUILDER_REPO_DEFAULT="ike-sh/caddy-naive-builder"
@@ -28,6 +44,8 @@ DOMAIN=""
 EMAIL=""
 AUTH_USER=""
 AUTH_PASS=""
+EXTRA_DOMAINS=""
+EXTRA_AUTH_RAW=""
 SITE_MODE="static"
 UPSTREAM=""
 UPSTREAM_BASE=""
@@ -79,11 +97,24 @@ RECORDED_BUILDER_RELEASE_ARCH=""
 RECORDED_BUILDER_RELEASE_ASSET=""
 LAST_CADDYFILE_BACKUP_FOR_RESTORE=""
 
+if [[ -z "${NAIVE_LIB_LOADED:-}" ]]; then
 log_info() { printf '[INFO] %s\n' "$*"; }
 log_warn() { printf '[WARN] %s\n' "$*" >&2; }
 log_error() { printf '[ERROR] %s\n' "$*" >&2; }
 log_ok() { printf '[OK] %s\n' "$*"; }
 die() { log_error "$*"; exit 1; }
+
+mask_secret() {
+  local value="$1"
+  local visible="${2:-4}"
+  local len="${#value}"
+  if (( len <= visible )); then
+    printf '****'
+    return 0
+  fi
+  printf '%s****' "${value:0:visible}"
+}
+fi
 
 read_tty() {
   local __var="$1"
@@ -163,6 +194,8 @@ usage() {
   --email EMAIL                Caddy 或 acme.sh 申请 ACME TLS 证书使用的邮箱。
   --user USER                  Basic Auth 用户名；不传则自动生成或复用。
   --pass PASS                  Basic Auth 密码；不传则自动生成或复用。
+  --extra-domain DOMAIN        额外绑定域名，可重复指定；与主域名共享同一代理实例。
+  --extra-auth USER:PASS       额外认证账号，可重复指定；格式 user:pass。
   --site-mode static|reverse   回落网站模式，默认 static。
   --upstream URL               reverse 模式必填。
   --cert-mode MODE             证书模式：caddy-auto、caddy-zerossl 或 acme-standalone，默认 acme-standalone。
@@ -216,6 +249,50 @@ refresh_cert_paths() {
 refresh_paths() {
   SERVICE_FILE="/etc/systemd/system/${SERVICE_NAME}.service"
   refresh_cert_paths
+}
+
+naive_all_domains() {
+  local primary="$1"
+  local extra="$2"
+  local result="$primary"
+  local item
+  [[ -n "$primary" ]] || return 0
+  [[ -n "$extra" ]] || { printf '%s' "$result"; return 0; }
+  IFS=',' read -ra _naive_extra_domains <<< "$extra"
+  for item in "${_naive_extra_domains[@]}"; do
+    item="${item#"${item%%[![:space:]]*}"}"
+    item="${item%"${item##*[![:space:]]}"}"
+    [[ -n "$item" ]] || continue
+    result+=" ${item}"
+  done
+  printf '%s' "$result"
+}
+
+naive_append_extra_domain() {
+  local domain="$1"
+  [[ -n "$domain" ]] || return 0
+  validate_domain "$domain"
+  if [[ -n "$EXTRA_DOMAINS" ]]; then
+    EXTRA_DOMAINS+=",${domain}"
+  else
+    EXTRA_DOMAINS="$domain"
+  fi
+}
+
+naive_append_extra_auth() {
+  local pair="$1"
+  local user pass
+  [[ -n "$pair" ]] || return 0
+  [[ "$pair" == *:* ]] || die "--extra-auth 格式应为 user:pass"
+  user="${pair%%:*}"
+  pass="${pair#*:}"
+  validate_auth_user_safe "$user"
+  validate_credential_token "PASS" "$pass"
+  if [[ -n "$EXTRA_AUTH_RAW" ]]; then
+    EXTRA_AUTH_RAW+=",${user}:${pass}"
+  else
+    EXTRA_AUTH_RAW="${user}:${pass}"
+  fi
 }
 
 url_encode() {
@@ -334,6 +411,16 @@ parse_args() {
         shift
         [[ $# -gt 0 ]] || die "--pass 需要一个值。"
         AUTH_PASS="$1"
+        ;;
+      --extra-domain)
+        shift
+        [[ $# -gt 0 ]] || die "--extra-domain 需要一个值。"
+        naive_append_extra_domain "$1"
+        ;;
+      --extra-auth)
+        shift
+        [[ $# -gt 0 ]] || die "--extra-auth 需要一个值（格式 user:pass）。"
+        naive_append_extra_auth "$1"
         ;;
       --site-mode)
         shift
@@ -985,6 +1072,10 @@ load_saved_install_info() {
   [[ -n "$value" ]] && AUTH_USER="$value"
   value="$(read_env_value PASS || true)"
   [[ -n "$value" ]] && AUTH_PASS="$value"
+  value="$(read_env_value EXTRA_DOMAINS || true)"
+  [[ -n "$value" ]] && EXTRA_DOMAINS="$value"
+  value="$(read_env_value EXTRA_AUTH || true)"
+  [[ -n "$value" ]] && EXTRA_AUTH_RAW="$value"
   value="$(read_env_value SITE_MODE || true)"
   [[ -n "$value" ]] && SITE_MODE="$value"
   value="$(read_env_value UPSTREAM || true)"
@@ -1073,9 +1164,10 @@ backup_file() {
   mkdir -p "$BACKUP_DIR"
   chmod 700 "$BACKUP_DIR" 2>/dev/null || true
 
-  local base dest
+  local base dest backup_ts
+  backup_ts="$(date +%Y%m%d_%H%M%S)"
   base="$(basename "$path")"
-  dest="${BACKUP_DIR}/${base}.${TIMESTAMP}.bak"
+  dest="${BACKUP_DIR}/${base}.${backup_ts}.bak"
   if [[ -e "$dest" || -L "$dest" ]]; then
     dest="${dest}.$$"
   fi
@@ -1461,9 +1553,14 @@ fix_static_site_permissions() {
 write_caddyfile_content() {
   local output_path="$1"
   local tls_mode="${2:-$CERT_MODE}"
-  local auth_user_caddy auth_pass_caddy
+  local auth_user_caddy auth_pass_caddy site_hosts extra_pair extra_user extra_pass
+  local -a extra_auth_pairs=()
   auth_user_caddy="$(caddyfile_quote "$AUTH_USER")"
   auth_pass_caddy="$(caddyfile_quote "$AUTH_PASS")"
+  site_hosts="$(naive_all_domains "$DOMAIN" "$EXTRA_DOMAINS")"
+  if [[ -n "$EXTRA_AUTH_RAW" ]]; then
+    IFS=',' read -ra extra_auth_pairs <<< "$EXTRA_AUTH_RAW"
+  fi
 
   if [[ "$tls_mode" == "acme-standalone" ]]; then
     if [[ ! -s "$CERT_FULLCHAIN" || ! -s "$CERT_KEY" ]]; then
@@ -1490,7 +1587,7 @@ write_caddyfile_content() {
     printf 'http://%s {\n' "$DOMAIN"
     printf '  redir https://{host}{uri} permanent\n'
     printf '}\n\n'
-    printf ':443, %s {\n' "$DOMAIN"
+    printf ':443, %s {\n' "$site_hosts"
     printf '  encode zstd gzip\n\n'
     if [[ "$tls_mode" == "acme-standalone" ]]; then
       printf '  tls %s %s\n\n' "$CERT_FULLCHAIN" "$CERT_KEY"
@@ -1500,6 +1597,14 @@ write_caddyfile_content() {
     printf '  route {\n'
     printf '    forward_proxy {\n'
     printf '      basic_auth %s %s\n' "$auth_user_caddy" "$auth_pass_caddy"
+    for extra_pair in "${extra_auth_pairs[@]}"; do
+      extra_pair="${extra_pair#"${extra_pair%%[![:space:]]*}"}"
+      extra_pair="${extra_pair%"${extra_pair##*[![:space:]]}"}"
+      [[ -n "$extra_pair" && "$extra_pair" == *:* ]] || continue
+      extra_user="${extra_pair%%:*}"
+      extra_pass="${extra_pair#*:}"
+      printf '      basic_auth %s %s\n' "$(caddyfile_quote "$extra_user")" "$(caddyfile_quote "$extra_pass")"
+    done
     printf '      hide_ip\n'
     printf '      hide_via\n'
     if [[ "$PROBE_RESISTANCE" == "on" ]]; then
@@ -1692,10 +1797,21 @@ install_acme_sh() {
   command -v curl >/dev/null 2>&1 || die "安装 acme.sh 需要 curl。"
 
   if [[ ! -x "$ACME_SH" ]]; then
-    local installer="/tmp/acme-install.sh"
+    local installer
+    installer="$(mktemp /tmp/acme-install.XXXXXX.sh)"
     log_info "正在安装 acme.sh..."
-    curl -fsSL https://get.acme.sh -o "$installer"
+    if ! curl -fsSL --proto '=https' --tlsv1.2 https://get.acme.sh -o "$installer"; then
+      rm -f "$installer"
+      die "acme.sh 安装脚本下载失败。"
+    fi
+    chmod 700 "$installer"
+    [[ -s "$installer" ]] || die "acme.sh 安装脚本为空。"
+    if ! head -n 1 "$installer" | grep -q '^#!'; then
+      rm -f "$installer"
+      die "acme.sh 安装脚本格式异常，已中止。"
+    fi
     sh "$installer" "email=${EMAIL}"
+    rm -f "$installer"
   else
     log_info "已检测到 acme.sh：$ACME_SH"
   fi
@@ -1726,10 +1842,22 @@ check_port80_for_acme_standalone() {
 
 issue_cert_with_acme_standalone() {
   local issue_backup=""
+  local item
+  local -a acme_domain_args=(-d "$DOMAIN")
   refresh_cert_paths
   [[ -n "$DOMAIN" ]] || die "缺少 DOMAIN，无法申请证书。"
   [[ -n "$EMAIL" ]] || die "缺少 EMAIL，无法注册 ZeroSSL 账户。"
   [[ -x "$ACME_SH" ]] || die "未找到 acme.sh：$ACME_SH"
+
+  if [[ -n "$EXTRA_DOMAINS" ]]; then
+    IFS=',' read -ra _naive_acme_extra <<< "$EXTRA_DOMAINS"
+    for item in "${_naive_acme_extra[@]}"; do
+      item="${item#"${item%%[![:space:]]*}"}"
+      item="${item%"${item##*[![:space:]]}"}"
+      [[ -n "$item" ]] || continue
+      acme_domain_args+=(-d "$item")
+    done
+  fi
 
   backup_file "$CADDYFILE"
   issue_backup="$LAST_BACKUP_PATH"
@@ -1738,10 +1866,10 @@ issue_cert_with_acme_standalone() {
   sleep 2
   check_port80_for_acme_standalone
 
-  log_info "正在使用 acme.sh + ZeroSSL standalone 申请证书：${DOMAIN}"
+  log_info "正在使用 acme.sh + ZeroSSL standalone 申请证书：$(naive_all_domains "$DOMAIN" "$EXTRA_DOMAINS")"
   if ! "$ACME_SH" --issue \
     --server zerossl \
-    -d "$DOMAIN" \
+    "${acme_domain_args[@]}" \
     --standalone \
     --httpport 80 \
     --force \
@@ -2187,6 +2315,8 @@ DOMAIN=${DOMAIN}
 EMAIL=${EMAIL}
 USER=${AUTH_USER}
 PASS=${AUTH_PASS}
+EXTRA_DOMAINS=${EXTRA_DOMAINS}
+EXTRA_AUTH=${EXTRA_AUTH_RAW}
 SITE_MODE=${SITE_MODE}
 UPSTREAM=${UPSTREAM_BASE}
 REPO=${REPO}
@@ -2431,7 +2561,9 @@ show_current_status() {
   cat <<STATUS
 [INFO] 当前配置
   部署域名：${DOMAIN:-未设置}
+  额外域名：${EXTRA_DOMAINS:-无}
   认证用户：${AUTH_USER:-未设置}
+  额外账号：$([[ -n "${EXTRA_AUTH_RAW:-}" ]] && echo "已配置" || echo "无")
   回落模式：${SITE_MODE:-未设置}
   反代目标：${UPSTREAM:-未设置}
   证书模式：${CERT_MODE:-未设置}
@@ -2561,6 +2693,7 @@ print_current_client_config() {
   cat <<CONFIG
 当前服务端配置：
   地址：${DOMAIN}
+  额外域名：${EXTRA_DOMAINS:-无}
   端口：443
   用户名：${AUTH_USER}
   密码：${AUTH_PASS}
