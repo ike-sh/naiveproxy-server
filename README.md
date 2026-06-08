@@ -1,5 +1,9 @@
 # NaiveProxy Server 1.0.5
 
+[![CI](https://github.com/ike-sh/naiveproxy-server/actions/workflows/ci.yml/badge.svg)](https://github.com/ike-sh/naiveproxy-server/actions/workflows/ci.yml)
+[![Release](https://github.com/ike-sh/naiveproxy-server/actions/workflows/release.yml/badge.svg)](https://github.com/ike-sh/naiveproxy-server/actions/workflows/release.yml)
+[![Latest Release](https://img.shields.io/github/v/release/ike-sh/naiveproxy-server?label=release)](https://github.com/ike-sh/naiveproxy-server/releases/latest)
+
 作者：ike-sh  
 GitHub：https://github.com/ike-sh/naiveproxy-server  
 Builder 仓库：https://github.com/ike-sh/caddy-naive-builder
