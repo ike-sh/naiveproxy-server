@@ -14,7 +14,7 @@ jobs:
       - name: Install ShellCheck
         run: sudo apt-get update && sudo apt-get install -y shellcheck
       - name: Run ShellCheck on lib/ and scripts/
-        run: shellcheck -x lib/*.sh scripts/*.sh
+        run: shellcheck -S error -x lib/*.sh scripts/*.sh
 
   bats:
     runs-on: ubuntu-latest

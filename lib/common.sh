@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # NaiveProxy Server — shared logging and helpers
 
-NAIVE_LIB_LOADED=1
+export NAIVE_LIB_LOADED=1
 
 log_info() { printf '[INFO] %s\n' "$*"; }
 log_warn() { printf '[WARN] %s\n' "$*" >&2; }
