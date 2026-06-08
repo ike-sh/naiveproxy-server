@@ -15,10 +15,16 @@
 
 ## 快速部署（推荐）
 
+安装包直链（当前稳定版 [v1.0.5](https://github.com/ike-sh/naiveproxy-server/releases/tag/v1.0.5)）：
+
+```text
+https://github.com/ike-sh/naiveproxy-server/releases/download/v1.0.5/install-naive-server.sh
+```
+
 ### 1. 一键安装
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/ike-sh/naiveproxy-server/main/install-naive-server.sh) \
+curl -fsSL https://github.com/ike-sh/naiveproxy-server/releases/download/v1.0.5/install-naive-server.sh | sudo bash -s -- \
   --domain proxy.example.com \
   --email admin@example.com \
   --site-mode static \
@@ -29,7 +35,7 @@ bash <(curl -fsSL https://raw.githubusercontent.com/ike-sh/naiveproxy-server/mai
 ### 2. 交互式菜单
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/ike-sh/naiveproxy-server/main/install-naive-server.sh)
+curl -fsSL https://github.com/ike-sh/naiveproxy-server/releases/download/v1.0.5/install-naive-server.sh | sudo bash
 ```
 
 选择 `1. 一键安装 / 重新配置`，按向导填写。

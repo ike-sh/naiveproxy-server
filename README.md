@@ -45,10 +45,18 @@ Builder 仓库：https://github.com/ike-sh/caddy-naive-builder
 
 ## 推荐安装
 
+**生产环境请使用 [v1.0.5 Release](https://github.com/ike-sh/naiveproxy-server/releases/tag/v1.0.5) 单文件安装包**（内联 `lib/`，无需克隆仓库）。`main` 分支脚本仅供开发调试。
+
 无参数且在终端中运行时会进入主菜单：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/ike-sh/naiveproxy-server/main/install-naive-server.sh)
+curl -fsSL https://github.com/ike-sh/naiveproxy-server/releases/download/v1.0.5/install-naive-server.sh | sudo bash
+```
+
+等价的进程替换写法：
+
+```bash
+bash <(curl -fsSL https://github.com/ike-sh/naiveproxy-server/releases/download/v1.0.5/install-naive-server.sh)
 ```
 
 如果系统没有 `curl`：
@@ -60,14 +68,14 @@ apt update && apt install -y curl
 也可以使用 `wget`：
 
 ```bash
-bash <(wget -qO- https://raw.githubusercontent.com/ike-sh/naiveproxy-server/main/install-naive-server.sh)
+wget -qO- https://github.com/ike-sh/naiveproxy-server/releases/download/v1.0.5/install-naive-server.sh | sudo bash
 ```
 
 显式进入主菜单：
 
 ```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/ike-sh/naiveproxy-server/main/install-naive-server.sh) --menu
-bash <(curl -fsSL https://raw.githubusercontent.com/ike-sh/naiveproxy-server/main/install-naive-server.sh) --interactive
+curl -fsSL https://github.com/ike-sh/naiveproxy-server/releases/download/v1.0.5/install-naive-server.sh | sudo bash -s -- --menu
+curl -fsSL https://github.com/ike-sh/naiveproxy-server/releases/download/v1.0.5/install-naive-server.sh | sudo bash -s -- --interactive
 ```
 
 `--interactive` / `-i` 也是进入主菜单。只有在主菜单选择 `1. 一键安装 / 重新配置` 后，才会进入安装向导。菜单项执行失败会显示错误并返回菜单，不会直接退出到 shell。
