@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # NaiveProxy Server — hostname and input validation
 
+if [[ -z "${NAIVE_LIB_LOADED:-}" ]]; then
+  # shellcheck source=common.sh disable=SC1091
+  source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+fi
+
 validate_hostname() {
   local name="$1"
   local label="${2:-域名}"

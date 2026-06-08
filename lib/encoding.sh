@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # NaiveProxy Server — encoding and quoting helpers
 
+if [[ -z "${NAIVE_LIB_LOADED:-}" ]]; then
+  # shellcheck source=common.sh disable=SC1091
+  source "$(dirname "${BASH_SOURCE[0]}")/common.sh"
+fi
+
 url_encode() {
   local raw="$1"
   local i c hex

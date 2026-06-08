@@ -389,4 +389,6 @@ main() {
   log_ok "Caddy naive 内核更新完成。"
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "${0}" ]]; then
+  main "$@"
+fi

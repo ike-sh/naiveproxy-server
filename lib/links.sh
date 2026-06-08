@@ -2,6 +2,11 @@
 # NaiveProxy Server — client link generators
 # Requires: lib/encoding.sh
 
+if ! declare -f url_encode >/dev/null 2>&1; then
+  # shellcheck source=encoding.sh disable=SC1091
+  source "$(dirname "${BASH_SOURCE[0]}")/encoding.sh"
+fi
+
 generate_v2rayn_link() {
   local user="$1"
   local pass="$2"
